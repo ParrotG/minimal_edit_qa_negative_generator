@@ -1,0 +1,2 @@
+[console_scripts]
+meqng = meqng.cli:app
