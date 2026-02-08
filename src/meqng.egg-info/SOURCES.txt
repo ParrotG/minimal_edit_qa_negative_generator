@@ -23,3 +23,5 @@ src/meqng/perturb/base.py
 src/meqng/perturb/entity_swap.py
 src/meqng/perturb/negation.py
 src/meqng/perturb/numeric.py
+src/meqng/perturb/span_drop.py
+src/meqng/perturb/textattack_nli.py

@@ -11,6 +11,7 @@ from .config import HaluEvalConfig
 from .nli import NLIVerifier
 from .ner import NERTagger, build_entity_bank
 from .io import write_json
+from .prompt import build_qa_premise
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ def sanity_check_nli(
     pos_h: List[str] = []
     neg_h: List[str] = []
     for s in samples:
-        premise = f"{s.knowledge}\nQuestion: {s.question}"
+        premise = build_qa_premise(s.knowledge, s.question)
         premises.append(premise)
         pos_h.append(s.right_answer)
         neg_h.append(s.hallucinated_answer)

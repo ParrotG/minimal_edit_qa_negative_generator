@@ -17,3 +17,5 @@ Requires-Dist: orjson>=3.10.0
 Requires-Dist: tqdm>=4.66.0
 Provides-Extra: grammar
 Requires-Dist: language-tool-python>=2.8.0; extra == "grammar"
+Provides-Extra: attack
+Requires-Dist: textattack>=0.3.10; extra == "attack"

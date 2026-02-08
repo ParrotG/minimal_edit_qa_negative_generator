@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 grammar = ["language-tool-python>=2.8.0"]
+attack = ["textattack>=0.3.10"]
 
 [project.scripts]
 meqng = "meqng.cli:app"

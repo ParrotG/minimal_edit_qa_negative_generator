@@ -5,6 +5,7 @@ from typing import Any, Dict
 
 from .base import FilterDecision
 from ..nli import NLIVerifier
+from ..prompt import build_qa_premise
 
 
 @dataclass
@@ -16,7 +17,7 @@ class NLIFlipFilter:
     entail_threshold_neg: float = 0.30
 
     def check(self, knowledge: str, question: str, chosen: str, candidate: str) -> FilterDecision:
-        premise = f"{knowledge}\nQuestion: {question}"
+        premise = build_qa_premise(knowledge, question)
         pos = self.verifier.score([premise], [chosen])[0]
         neg = self.verifier.score([premise], [candidate])[0]
 

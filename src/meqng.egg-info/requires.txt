@@ -11,5 +11,8 @@ pydantic>=2.7.0
 orjson>=3.10.0
 tqdm>=4.66.0
 
+[attack]
+textattack>=0.3.10
+
 [grammar]
 language-tool-python>=2.8.0
