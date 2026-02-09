@@ -24,6 +24,10 @@ from .halueval_common import (
 )
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.IGNORECASE | re.DOTALL)
+_ROLE_PREFIX_RE = re.compile(r"^(?:\s*(?:user|assistant)\s*\n)+", flags=re.IGNORECASE)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
@@ -74,6 +78,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--enable_thinking", action="store_true")
+    parser.add_argument(
+        "--strip_think_tags",
+        action="store_true",
+        help="If set, strip <think>...</think> blocks from generated answers before RAGAS evaluation.",
+    )
+    parser.add_argument(
+        "--strip_role_markers",
+        action="store_true",
+        help="If set, strip leaked role markers (user/assistant) from generated answers before RAGAS evaluation.",
+    )
 
     # RAGAS judge
     parser.add_argument("--judge_model", type=str, default="gpt-4o-mini")
@@ -148,6 +162,26 @@ def load_lora_model(
     return model, tokenizer
 
 
+def _sanitize_generated_text(text: str, strip_think_tags: bool, strip_role_markers: bool) -> str:
+    """
+    Cleanup generated text for faithfulness evaluation.
+
+    This only removes obvious chat-template leakage artifacts and optional think blocks.
+    """
+    out = (text or "").strip()
+    if strip_role_markers:
+        # If generation accidentally includes prompt tail, keep content after the last assistant marker.
+        marker = "assistant\n"
+        if marker in out.lower():
+            lower = out.lower()
+            idx = lower.rfind(marker)
+            out = out[idx + len(marker) :].strip()
+        out = _ROLE_PREFIX_RE.sub("", out).strip()
+    if strip_think_tags:
+        out = _THINK_BLOCK_RE.sub("", out).strip()
+    return out
+
+
 @torch.no_grad()
 def generate_answers(
     model: AutoModelForCausalLM,
@@ -156,6 +190,8 @@ def generate_answers(
     max_new_tokens: int,
     temperature: float,
     top_p: float,
+    strip_think_tags: bool,
+    strip_role_markers: bool,
 ) -> List[str]:
     """
     Generate answers for a batch of prompts.
@@ -174,13 +210,21 @@ def generate_answers(
         do_sample=do_sample,
         temperature=temperature if do_sample else None,
         top_p=top_p if do_sample else None,
+        pad_token_id=tokenizer.pad_token_id,
     )
 
+    # IMPORTANT: under left padding, prompt lengths differ across rows, but generate() outputs
+    # tensors aligned to the padded input length. Slice by the padded width, not attention sum.
+    prompt_padded_len = int(inputs["input_ids"].shape[1])
     results: List[str] = []
     for i in range(len(prompts)):
-        prompt_len = int(inputs["attention_mask"][i].sum().item())
-        out_ids = gen_ids[i][prompt_len:]
+        out_ids = gen_ids[i][prompt_padded_len:]
         text = tokenizer.decode(out_ids, skip_special_tokens=True).strip()
+        text = _sanitize_generated_text(
+            text=text,
+            strip_think_tags=strip_think_tags,
+            strip_role_markers=strip_role_markers,
+        )
         results.append(text)
     return results
 
@@ -288,6 +332,8 @@ def _generate_for_model(
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
+            strip_think_tags=args.strip_think_tags,
+            strip_role_markers=args.strip_role_markers,
         )
 
         for x, ans in zip(batch, answers):

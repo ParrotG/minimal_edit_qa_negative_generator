@@ -22,6 +22,139 @@ def token_len(tokenizer: AutoTokenizer, text: str) -> int:
     return len(tokenizer(text, add_special_tokens=False).input_ids)
 
 
+def _infer_eval_fields_from_meqng_row(row: Dict) -> Tuple[str, List[str], str]:
+    """
+    Infer (eval_question, eval_contexts, plain_prompt) from a meqng row.
+
+    Priority:
+    1) Use explicit question/knowledge/prompt fields when present.
+    2) Best-effort parse from prompt with the canonical separator "\\nQuestion: ".
+    """
+    prompt = (row.get("prompt") or "").strip()
+    question = (row.get("question") or "").strip()
+    knowledge = (row.get("knowledge") or "").strip()
+
+    if not question and prompt and "\nQuestion: " in prompt:
+        left, right = prompt.rsplit("\nQuestion: ", 1)
+        knowledge = knowledge or left.strip()
+        question = right.strip()
+
+    if not prompt:
+        if knowledge and question:
+            prompt = f"{knowledge}\nQuestion: {question}"
+        else:
+            prompt = question or knowledge
+
+    contexts = [knowledge] if knowledge else []
+    return question, contexts, prompt
+
+
+def convert_meqng_jsonl_to_dpo(
+    jsonl_path: str,
+    tokenizer: AutoTokenizer,
+    max_samples: Optional[int],
+    seed: int,
+    max_prompt_length: int,
+    max_length: int,
+    enable_thinking: bool,
+    keep_chat_prompt: bool,
+    keep_length_metadata: bool,
+    default_task_label: str,
+) -> Dataset:
+    """
+    Convert meqng JSONL outputs into DPO format compatible with existing training/eval scripts.
+
+    Expected core fields in each row:
+      - prompt / chosen / rejected
+    Optional fields used when available:
+      - id, source_id, task, question, knowledge, eval_question, eval_contexts
+    """
+    ds = load_dataset("json", data_files=jsonl_path, split="train").shuffle(seed=seed)
+
+    def _map(row: Dict, idx: int) -> Dict:
+        chosen = (row.get("chosen") or "").strip()
+        rejected = (row.get("rejected") or "").strip()
+
+        eval_question = (row.get("eval_question") or "").strip()
+        eval_contexts = row.get("eval_contexts") or []
+        if not isinstance(eval_contexts, list):
+            eval_contexts = [str(eval_contexts)]
+        eval_contexts = [str(x).strip() for x in eval_contexts if str(x).strip()]
+
+        if not eval_question or not eval_contexts:
+            q2, c2, prompt = _infer_eval_fields_from_meqng_row(row)
+            eval_question = eval_question or q2
+            eval_contexts = eval_contexts or c2
+        else:
+            prompt = (row.get("prompt") or "").strip()
+            if not prompt:
+                knowledge = eval_contexts[0] if eval_contexts else ""
+                prompt = f"{knowledge}\nQuestion: {eval_question}".strip()
+
+        chat_prompt = to_chat_prompt(tokenizer, prompt, enable_thinking=enable_thinking)
+        p_len = token_len(tokenizer, chat_prompt)
+        c_len = token_len(tokenizer, chosen) if chosen else 0
+        r_len = token_len(tokenizer, rejected) if rejected else 0
+
+        source_id = str(row.get("source_id") or row.get("id") or f"meqng:{idx}")
+        task = str(row.get("task") or default_task_label)
+
+        out = {
+            "task": task,
+            "source_id": source_id,
+            "prompt": prompt,
+            "eval_question": eval_question,
+            "eval_contexts": eval_contexts,
+            "chat_prompt": chat_prompt,
+            "chosen": chosen,
+            "rejected": rejected,
+        }
+
+        # Keep useful meqng provenance metadata when present.
+        for key in ("perturbator", "perturb_meta", "filter_meta", "filter_trace", "difficulty", "difficulty_bucket"):
+            if key in row:
+                out[key] = row[key]
+
+        if keep_length_metadata:
+            out.update(
+                {
+                    "prompt_tokens": p_len,
+                    "chosen_tokens": c_len,
+                    "rejected_tokens": r_len,
+                    "chosen_total_tokens": p_len + c_len,
+                    "rejected_total_tokens": p_len + r_len,
+                }
+            )
+        return out
+
+    ds = ds.map(_map, with_indices=True, remove_columns=ds.column_names)
+
+    def _length_ok(row: Dict) -> bool:
+        if not row["chosen"] or not row["rejected"] or not row["prompt"]:
+            return False
+
+        p_len = row["prompt_tokens"] if "prompt_tokens" in row else token_len(tokenizer, row["chat_prompt"])
+        if p_len > max_prompt_length:
+            return False
+
+        c_len = row["chosen_tokens"] if "chosen_tokens" in row else token_len(tokenizer, row["chosen"])
+        r_len = row["rejected_tokens"] if "rejected_tokens" in row else token_len(tokenizer, row["rejected"])
+        if p_len + c_len > max_length:
+            return False
+        if p_len + r_len > max_length:
+            return False
+        return True
+
+    ds = ds.filter(_length_ok)
+
+    if max_samples is not None:
+        ds = ds.select(range(min(max_samples, len(ds))))
+
+    if not keep_chat_prompt:
+        ds = ds.remove_columns(["chat_prompt"])
+    return ds
+
+
 def convert_config_to_dpo(
     config_name: str,
     tokenizer: AutoTokenizer,
@@ -157,10 +290,30 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
+        "--source",
+        type=str,
+        default="halueval",
+        choices=["halueval", "meqng"],
+        help="Input source type. halueval: load from HF raw subsets; meqng: load from local JSONL.",
+    )
+
+    parser.add_argument(
         "--subsets",
         type=str,
         default="dialogue,qa,summarization",
         help="Comma-separated HaluEval subsets to include: dialogue,qa,summarization",
+    )
+    parser.add_argument(
+        "--meqng_jsonl",
+        type=str,
+        default=None,
+        help="Path to meqng JSONL (used when --source=meqng).",
+    )
+    parser.add_argument(
+        "--meqng_task_label",
+        type=str,
+        default="qa",
+        help="Default task label for meqng rows when task field is absent.",
     )
 
     parser.add_argument(
@@ -213,18 +366,34 @@ def main() -> None:
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    subsets = parse_subsets_arg(args.subsets)
-
     max_n = None if args.max_samples_per_subset < 0 else args.max_samples_per_subset
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name_or_path)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    parts: List[Dataset] = []
-    for subset in subsets:
-        part = convert_config_to_dpo(
-            config_name=subset,
+    if args.source == "halueval":
+        subsets = parse_subsets_arg(args.subsets)
+        parts: List[Dataset] = []
+        for subset in subsets:
+            part = convert_config_to_dpo(
+                config_name=subset,
+                tokenizer=tokenizer,
+                max_samples=max_n,
+                seed=args.seed,
+                max_prompt_length=args.max_prompt_length,
+                max_length=args.max_length,
+                enable_thinking=args.enable_thinking,
+                keep_chat_prompt=args.keep_chat_prompt,
+                keep_length_metadata=args.keep_length_metadata,
+            )
+            parts.append(part)
+        merged = concatenate_datasets(parts).shuffle(seed=args.seed)
+    else:
+        if not args.meqng_jsonl:
+            raise ValueError("When --source=meqng, --meqng_jsonl is required.")
+        merged = convert_meqng_jsonl_to_dpo(
+            jsonl_path=args.meqng_jsonl,
             tokenizer=tokenizer,
             max_samples=max_n,
             seed=args.seed,
@@ -233,10 +402,9 @@ def main() -> None:
             enable_thinking=args.enable_thinking,
             keep_chat_prompt=args.keep_chat_prompt,
             keep_length_metadata=args.keep_length_metadata,
+            default_task_label=args.meqng_task_label,
         )
-        parts.append(part)
 
-    merged = concatenate_datasets(parts).shuffle(seed=args.seed)
     ds_dict = split_dataset(
         merged,
         train_ratio=args.train_ratio,
