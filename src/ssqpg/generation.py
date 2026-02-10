@@ -346,6 +346,8 @@ class ApiSelfSampler:
         payload: Dict[str, Any] = {
             "model": self._model_name,
             "messages": [{"role": "user", "content": prompt}],
+            # DashScope non-streaming calls require explicit disablement.
+            "enable_thinking": False,
             "max_tokens": self.cfg.max_new_tokens,
             "temperature": self.cfg.temperature,
             "top_p": self.cfg.top_p,
