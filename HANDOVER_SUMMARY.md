@@ -1,81 +1,77 @@
-# 项目交接备忘（非正式）
+# 项目交接备忘（非正式，已同步到最新代码/结果）
 
-## 1. 背景与动机
-- 研究目标：用 DPO 后训练提升 LLM 在类 RAG QA 场景下的忠实度（给定知识可回答时，答案应被知识支持）。
-- 当前阶段不讨论拒答机制，默认问题在给定知识下可回答。
-- 原先直接使用 HaluEval 的正反例训练，观察到提升有限且后期震荡/回落；怀疑模型学到数据伪特征（表观差异）而非“是否被知识支持”信号。
-- 因此转向“最小编辑负例”思路：从 `knowledge + question + right_answer` 出发，对正确答案做最小扰动生成不被支持的反例，再经后过滤保真。
+## 1. 背景与目标
+- 目标：用 DPO 提升类 RAG QA 忠实度（已知可回答前提下，答案应被给定知识支持）。
+- 当前不讨论拒答机制。
+- 早期直接用 HaluEval 原始正反例训练，提升有限且后期震荡；怀疑存在可被模型利用的表观偏差。
+- 因此切换到最小编辑负例路线：从 `knowledge + question + right_answer` 生成“最小但不被支持”的 rejected，再过滤与分桶。
 
-## 2. 范围与关键设定（已确认）
-- 数据源：当前仅使用 `HaluEval/qa`（不做 `qa_samples` 兼容）。
-- 数据形式：英文短文本为主，训练样本总长度约束在 1024 token 内。
-- 运行方式：分段流水线，不做一键端到端。
-- 资源约束：本地 12GB VRAM + 32GB RAM，预算有限，优先性价比与可复现。
+## 2. 当前范围与约束
+- 数据范围：当前阶段仅 `HaluEval/qa`。
+- 资源约束：本地 12GB VRAM / 32GB RAM，优先可复现和性价比。
+- 工程方式：分段运行，保留中间产物（sample/candidate/dpo pair）。
 
-## 3. 工程目标（本轮）
-- 增强扰动层：在规则扰动外增加 TextAttack 类扰动（扰动器2）。
-- 增强过滤层：加入更完整的过滤与排序。
-- 增加难度分桶：支持按 policy logprob 差进行 easy/medium/hard 标注（默认模型 `Qwen/Qwen3-0.6B`）。
-- 统一 NLI premise 拼接格式，避免各模块不一致。
-- 暂不实现偏差审计模块（artifact probe）。
-
-## 4. 已完成功能（当前代码状态）
-- 统一拼接入口：
-  - 新增 `src/meqng/prompt.py`，统一 `knowledge + "\nQuestion: " + question`。
-  - NLI 相关模块（sanity-check/sampling/filter/textattack）均复用该入口。
-- 采样增强：
-  - `halu sample` 支持 `chosen entail` 阈值过滤（可配 NLI 模型/设备/长度等）。
+## 3. 已落地能力（meqng 侧）
+- 统一 NLI premise 拼接：`knowledge + "\\nQuestion: " + question`（避免各模块不一致）。
+- 采样阶段新增 entailment 阈值过滤（正例可按门槛预筛）。
 - 扰动层：
-  - 规则扰动保留（实体替换/数值扰动/否定扰动）。
-  - 新增 TextAttack + NLI flip 扰动器（可选开启，含实体/数字保护、编辑与语义约束、contradiction/neutral 比例）。
-  - 新增轻量 span 级扰动 `span_drop`（可选开启）。
-  - 支持“单扰动器多次尝试”（attempt 参数），提高候选多样性。
+  - 规则扰动（实体、数字、否定）保留。
+  - TextAttack/NLI-flip 扰动已接入（可配置约束与目标标签比例）。
+  - 轻量 span 级扰动（`span_drop`）已实现。
+  - 支持同一候选的多次扰动尝试（attempt 参数）。
 - 过滤与排序：
-  - 基础过滤：长度比、编辑距离、答案类型。
-  - 新增 QA 语义一致性过滤（可开关）。
-  - 新增语法过滤（可开关，依赖 `language_tool_python`）。
-  - NLI 翻转过滤保留。
-  - 新增启发式排序分数（hardness + 最小编辑 + 长度接近 + QA一致性）。
+  - 长度比、编辑距离、答案类型、NLI 支持度过滤。
+  - QA 一致性/语法过滤可选。
+  - 候选排序（最小编辑 + 难度 + 其他启发）。
 - 难度分桶：
-  - 新增 `DifficultyScorer`，按 `delta = logP(chosen) - logP(rejected)` 计算难度并分桶。
-  - `filter apply` 可直接启用分桶。
-  - 新增 `filter bucket` 独立命令，便于分段运行。
-- 文档与配置：
-  - README 已补充 Stage 4/5 命令示例。
-  - `config.py` 增加 Filter/Difficulty 等默认参数配置。
+  - 按 `delta = logP(chosen) - logP(rejected)` 打分并分桶。
+  - 默认难度模型接口为 `Qwen/Qwen3-0.6B`（可替换）。
 
-## 5. 已知现象与阶段结论
-- 你已实测运行成功并产出 `dpo_pairs.jsonl` 等数据。
-- 数据质量与训练收益尚待验证（当前只完成了数据构建能力，不等于训练效果已确认）。
-- 先前 sanity-check（1000 样本）显示正例整体可被支持、反例存在一定“非反例化”比例，符合“需二次构造与过滤”的动机。
+## 4. 已落地能力（dpo_trainer 侧）
+- 新增 meqng 数据接入：
+  - `src/dpo_trainer/preprocess_halueval_pairs_to_dpo.py` 支持 `--source meqng --meqng_jsonl ...`。
+  - 会优先读取 `eval_question/eval_contexts`；缺失时从 `prompt` 反推兼容字段。
+- 训练/评估管线维持原逻辑为主，仅增加输入兼容接口。
+- 运行方式提醒：
+  - 直接执行脚本会触发相对导入错误，建议 `python -m src.dpo_trainer.xxx` 或安装 editable 包后再调用。
 
-## 6. 尚未完成/待完善
-- 偏差审计（artifact probe）未实现。
-- NLI 多模型集成投票（当前主流程仍以单模型为主）未落地。
-- 难度分桶的阈值与训练收益关系尚未系统标定。
-- 扰动配比（规则 vs textattack）当前仍需按通过率/成本做动态调参。
-- 训练侧（DPO/cDPO/robust loss）尚未形成完整对照实验结论。
+## 5. RAGAS 评估问题与修复（关键）
+- 已定位并修复 `answer` 污染问题（混入 `user/assistant/<think>/Question:`）：
+  - 根因是左填充下按 `attention_mask.sum()` 截断生成结果，导致切片错位。
+  - 修复为按 padded 宽度截断，并补 `pad_token_id`。
+  - 在 `src/dpo_trainer/ragas_faithfulness_halueval.py` 新增清洗选项：
+    - `--strip_role_markers`
+    - `--strip_think_tags`
+- 修复后抽检：
+  - `assistant` 泄漏 0%
+  - `<think>` 泄漏 0%
+  - 仍有少量 `Question:` 回显（约 1.33%，主要集中早期 checkpoint）。
 
-## 7. 仍在讨论或未最终确认的问题
-- 是否采用 NLI 集成（多模型）替代单模型过滤作为默认。
-- 是否将更复杂的 span 级方法（span infilling/replacement）纳入 PoC；当前仅实现了可控 `span_drop`。
-- 是否引入 `attack-lite / attack-full` 依赖分层（曾讨论，未最终确认实施）。
-- TextAttack 依赖链的安装稳健性策略（见下方风险）。
+## 6. 最新实验信号（修复后曲线）
+- `outputs/results/meqng_ragas_curve.csv`：
+  - base: `0.772865`
+  - best checkpoint: step 60, `0.774749`（仅微幅高于 base）
+  - 多数 checkpoint 低于 base，step 20 明显下滑（`0.662514`）
+- `outputs/results/meqng_pairwise_curve.csv`：
+  - `pairwise_acc` 持续接近 `0.989`
+  - 与 RAGAS 忠实度趋势不一致，说明“偏好学习成功”未稳定转化为“事实忠实提升”。
+- 当前结论：包装噪声已大幅缓解，但训练信号与目标指标仍存在错配风险。
 
-## 8. 依赖与环境风险
-- `.[attack]` 会引入 `textattack` 及其传递依赖（如 `flair -> sentencepiece`），在某些环境可能触发源码编译失败（如 `cmake/pkg-config` 问题）。
-- `.[grammar]` 仅在启用语法过滤时需要。
-- 该项目采用“核心依赖 + 可选依赖”分层，目的是降低默认安装成本与失败率。
+## 7. 已知风险与未完成项
+- 偏差审计（artifact probe）尚未实现（按计划暂缓）。
+- NLI 多模型集成投票/交叉验证仍未落地。
+- 难度分桶阈值与真实训练收益尚未系统标定。
+- TextAttack 依赖链重：`.[attack]` 可能触发 `sentencepiece` 源码编译失败（`cmake/pkg-config` 环境问题）。
+- RAGAS 样本仍见少量 `faithfulness=None`，统计时需明确处理方式（剔除或单独计数）。
 
-## 9. 你的偏好/规范/限制（对后续协作很关键）
-- Python 3.11；默认不随意升级依赖。
-- 代码注释与用户可见字符串用英文；对你的解释/总结用中文。
-- 强调学术可辩护性与工程可落地性并重。
-- 偏好分段执行、可调参数暴露、可观察中间产物。
-- 你希望每次改动后给出可运行命令，但不要代理自动执行。
+## 8. 协作偏好与规范（持续有效）
+- Python 3.11；默认不主动升级依赖。
+- 代码注释/日志/报错英文；沟通总结中文。
+- 偏好分段运行、参数可调、可观察中间产物。
+- 你希望每次代码编辑后给可执行命令，但不代跑命令。
 
-## 10. 建议的下一步（简）
-1. 先做小规模人工抽检（分层抽样：通过/拒绝/阈值边界）。
-2. 跑最小训练对照（原始反例 vs 最小编辑反例 vs 混合）看忠实度与稳定性。
-3. 根据通过率与成本回调扰动/过滤阈值，再考虑引入偏差审计与 NLI 集成。
-
+## 9. 建议的下一步（最小可执行）
+1. 以 step 60 为候选早停点，做多随机种子复现实验，确认是否稳健优于 base。
+2. 同时报 `pairwise + ragas + 人工抽检` 三指标，避免单指标误判。
+3. 对早期崩塌（step 20）做保守超参回调（更小 LR / 更长 warmup / 更保守 beta）。
+4. 在候选构造侧提高 hard 比例并做分桶混合对照，验证是否能把偏好收益转成忠实度收益。

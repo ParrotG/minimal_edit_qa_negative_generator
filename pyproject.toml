@@ -16,6 +16,7 @@ dependencies = [
   "pydantic>=2.7.0",
   "orjson>=3.10.0",
   "tqdm>=4.66.0",
+  "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,7 @@ attack = ["textattack>=0.3.10"]
 
 [project.scripts]
 meqng = "meqng.cli:app"
+ssqpg = "ssqpg.cli:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
