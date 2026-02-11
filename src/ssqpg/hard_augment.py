@@ -12,7 +12,7 @@ from .answer_filter import apply_answer_filters
 from .config import AnswerFilterConfig, GenerationConfig, HardAugmentConfig
 from .generation import ApiSelfSampler, SelfSampler
 from .judge import AnswerJudge
-from .pairing_v2 import summarize_question_groups
+from .pairing import summarize_question_groups
 from .prompt import build_repair_prompt
 from .text import normalize_whitespace
 

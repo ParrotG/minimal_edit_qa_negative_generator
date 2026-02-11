@@ -204,8 +204,6 @@ def apply_pair_filters(
             "task": "qa",
             "knowledge": row["knowledge"],
             "question": row["question"],
-            "eval_question": row["question"],
-            "eval_contexts": [row["knowledge"]],
             "chosen": chosen,
             "rejected": rejected,
             "difficulty_label": row.get("difficulty_label"),
@@ -220,7 +218,7 @@ def apply_pair_filters(
             "rank_components": rank_comp,
         }
         if include_prompt:
-            out["prompt"] = row["prompt"]
+            out["prompt"] = build_qa_premise(row["knowledge"], row["question"])
         kept.append(out)
 
     counts["num_kept"] = len(kept)

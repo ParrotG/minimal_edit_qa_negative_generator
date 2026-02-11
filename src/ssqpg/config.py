@@ -87,14 +87,6 @@ class JudgeConfig:
 
 
 @dataclass(frozen=True)
-class PairBuildConfig:
-    """Configuration for converting judged answers into pair records."""
-
-    min_trials_for_very_label: int = 10
-    keep_easy_without_negative: bool = False
-
-
-@dataclass(frozen=True)
 class AnswerFilterConfig:
     """Single-answer filtering configuration before per-question grouping."""
 
@@ -188,8 +180,8 @@ class PairFilterConfig:
 
     min_norm_edit: float = 0.001
     max_norm_edit: float = 0.8
-    min_length_ratio: float = 0.5
-    max_length_ratio: float = 2
+    min_length_ratio: float = 0.333
+    max_length_ratio: float = 3
     enforce_answer_type: bool = True
     spacy_model: str = "en_core_web_trf"
     qa_similarity_model_name: Optional[str] = "sentence-transformers/all-MiniLM-L6-v2"

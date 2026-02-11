@@ -18,7 +18,6 @@ from .config import (
     HaluEvalSourceConfig,
     JudgeConfig,
     NLIConfig,
-    PairBuildConfig,
     PairFilterConfig,
     PairSelectConfig,
     RepairConfig,
@@ -32,8 +31,7 @@ from .hard_augment import repair_hard_with_api, resample_hard_answers
 from .io import read_jsonl, write_json, write_jsonl
 from .judge import AnswerJudge
 from .nli import NLIVerifier
-from .pairing import build_pairs
-from .pairing_v2 import build_pairs_v2, summarize_question_groups
+from .pairing import build_pairs, summarize_question_groups
 from .repair import MinimalEditRepairer
 
 
@@ -362,42 +360,6 @@ def judge_answers(
 def pair_build(
     in_path: str = typer.Option(..., help="Input judged JSONL path."),
     out: str = typer.Option(..., help="Output pair-level JSONL path."),
-    min_trials_for_very_label: int = typer.Option(
-        PairBuildConfig.min_trials_for_very_label,
-        help="Minimum trials to assign very_easy / very_hard.",
-    ),
-    keep_easy_without_negative: bool = typer.Option(
-        PairBuildConfig.keep_easy_without_negative,
-        help="Keep easy records without rejected as needs_more_sampling.",
-    ),
-    metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
-) -> None:
-    """Stage 4: build pair-level records and difficulty labels from judged generations."""
-
-    rows = list(read_jsonl(in_path))
-    cfg = PairBuildConfig(
-        min_trials_for_very_label=min_trials_for_very_label,
-        keep_easy_without_negative=keep_easy_without_negative,
-    )
-    pairs, status_counts = build_pairs(rows, cfg)
-    write_jsonl(out, pairs)
-
-    metrics = {
-        "num_input_rows": len(rows),
-        "num_pair_rows": len(pairs),
-        "status_counts": status_counts,
-    }
-    if metrics_out:
-        write_json(metrics_out, metrics)
-
-    console.print(f"Saved {len(pairs)} pair rows to {out}")
-    console.print_json(json.dumps(metrics))
-
-
-@pair_app.command("build-v2")
-def pair_build_v2(
-    in_path: str = typer.Option(..., help="Input judged JSONL path."),
-    out: str = typer.Option(..., help="Output pair-level JSONL path."),
     out_filtered_judged: Optional[str] = typer.Option(None, help="Optional output path for answer-filtered judged rows."),
     out_augmented_judged: Optional[str] = typer.Option(None, help="Optional output path for augmented judged rows."),
     tokenizer_name: str = typer.Option(AnswerFilterConfig.tokenizer_name, help="Tokenizer name for answer-token filtering."),
@@ -473,7 +435,7 @@ def pair_build_v2(
     qa_similarity_min: float = typer.Option(JudgeConfig.qa_similarity_min, help="QA similarity threshold in augmentation judge."),
     metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
 ) -> None:
-    """Stage 4 (v2): answer-filter -> regroup -> hard augmentation -> pair selection."""
+    """Stage 4: answer-filter -> regroup -> hard augmentation -> pair selection."""
 
     rows = list(read_jsonl(in_path))
 
@@ -596,7 +558,7 @@ def pair_build_v2(
         hard_negative_edit_proximity_weight=hard_negative_edit_proximity_weight,
         hard_negative_length_proximity_weight=hard_negative_length_proximity_weight,
     )
-    pairs, status_counts, _ = build_pairs_v2(working_rows, pair_cfg)
+    pairs, status_counts, pair_group_counts = build_pairs(working_rows, pair_cfg)
     write_jsonl(out, pairs)
 
     metrics = {
@@ -611,6 +573,7 @@ def pair_build_v2(
         "group_counts_final": group_counts_final,
         "num_augmented_judged_rows": len(working_rows),
         "num_pair_rows": len(pairs),
+        "pair_group_counts": pair_group_counts,
         "pair_status_counts": status_counts,
     }
     if metrics_out:
