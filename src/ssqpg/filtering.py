@@ -9,6 +9,7 @@ from .config import PairFilterConfig
 from .ner import NERTagger, extract_numbers
 from .nli import NLIVerifier
 from .text import length_ratio, normalized_edit_distance
+from .prompt import build_qa_premise
 
 
 _YEAR_RE = re.compile(r"\b\d{4}\b")

@@ -2,21 +2,25 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
 
 from .audit import surface_signal_audit
+from .answer_filter import apply_answer_filters
 from .config import (
+    AnswerFilterConfig,
     AuditConfig,
     DifficultyConfig,
     GenerationConfig,
+    HardAugmentConfig,
     HaluEvalSourceConfig,
     JudgeConfig,
     NLIConfig,
     PairBuildConfig,
     PairFilterConfig,
+    PairSelectConfig,
     RepairConfig,
     SourceLengthConfig,
 )
@@ -24,10 +28,12 @@ from .dataset import filter_source_by_length, iter_halueval_source, iter_jsonl_s
 from .difficulty import assign_difficulty_buckets
 from .filtering import apply_pair_filters
 from .generation import ApiSelfSampler, SelfSampler
+from .hard_augment import repair_hard_with_api, resample_hard_answers
 from .io import read_jsonl, write_json, write_jsonl
 from .judge import AnswerJudge
 from .nli import NLIVerifier
 from .pairing import build_pairs
+from .pairing_v2 import build_pairs_v2, summarize_question_groups
 from .repair import MinimalEditRepairer
 
 
@@ -380,6 +386,232 @@ def pair_build(
         "num_input_rows": len(rows),
         "num_pair_rows": len(pairs),
         "status_counts": status_counts,
+    }
+    if metrics_out:
+        write_json(metrics_out, metrics)
+
+    console.print(f"Saved {len(pairs)} pair rows to {out}")
+    console.print_json(json.dumps(metrics))
+
+
+@pair_app.command("build-v2")
+def pair_build_v2(
+    in_path: str = typer.Option(..., help="Input judged JSONL path."),
+    out: str = typer.Option(..., help="Output pair-level JSONL path."),
+    out_filtered_judged: Optional[str] = typer.Option(None, help="Optional output path for answer-filtered judged rows."),
+    out_augmented_judged: Optional[str] = typer.Option(None, help="Optional output path for augmented judged rows."),
+    tokenizer_name: str = typer.Option(AnswerFilterConfig.tokenizer_name, help="Tokenizer name for answer-token filtering."),
+    min_answer_tokens: int = typer.Option(AnswerFilterConfig.min_answer_tokens, help="Minimum answer tokens."),
+    max_answer_tokens: int = typer.Option(AnswerFilterConfig.max_answer_tokens, help="Maximum answer tokens."),
+    max_answer_chars: int = typer.Option(AnswerFilterConfig.max_answer_chars, help="Maximum answer characters."),
+    require_qa_consistent: bool = typer.Option(AnswerFilterConfig.require_qa_consistent, help="Require qa_consistent=true from judged rows."),
+    require_reference_supported: bool = typer.Option(
+        AnswerFilterConfig.require_reference_supported,
+        help="Require reference_supported_primary=true when reference exists.",
+    ),
+    drop_prompt_leak: bool = typer.Option(AnswerFilterConfig.drop_prompt_leak, help="Drop answers with prompt-leak markers."),
+    drop_option_style: bool = typer.Option(AnswerFilterConfig.drop_option_style, help="Drop option-style answers."),
+    drop_easy: bool = typer.Option(PairSelectConfig.drop_easy, help="Drop easy questions after grouping."),
+    keep_unresolved_hard: bool = typer.Option(PairSelectConfig.keep_unresolved_hard, help="Keep unresolved hard questions as needs_positive."),
+    hard_negative_entail_weight: float = typer.Option(
+        PairSelectConfig.hard_negative_entail_weight,
+        help="Weight of rejected entailment when selecting hard negatives.",
+    ),
+    hard_negative_edit_proximity_weight: float = typer.Option(
+        PairSelectConfig.hard_negative_edit_proximity_weight,
+        help="Weight of edit proximity when selecting hard negatives.",
+    ),
+    hard_negative_length_proximity_weight: float = typer.Option(
+        PairSelectConfig.hard_negative_length_proximity_weight,
+        help="Weight of length proximity when selecting hard negatives.",
+    ),
+    extra_samples_per_hard: int = typer.Option(HardAugmentConfig.extra_samples_per_hard, help="Extra same-model samples per hard question."),
+    resample_backend: str = typer.Option(HardAugmentConfig.resample_backend, help="Resampling backend: local or api."),
+    resample_model_name: str = typer.Option(HardAugmentConfig.resample_model_name, help="Resampling model name for backend=local."),
+    resample_device: str = typer.Option(HardAugmentConfig.resample_device, help="Resampling device for backend=local."),
+    resample_batch_size: int = typer.Option(HardAugmentConfig.resample_batch_size, help="Resampling batch size."),
+    resample_max_new_tokens: int = typer.Option(HardAugmentConfig.resample_max_new_tokens, help="Resampling max new tokens."),
+    resample_temperature: float = typer.Option(HardAugmentConfig.resample_temperature, help="Resampling temperature."),
+    resample_top_p: float = typer.Option(HardAugmentConfig.resample_top_p, help="Resampling top-p."),
+    resample_top_k: int = typer.Option(HardAugmentConfig.resample_top_k, help="Resampling top-k."),
+    resample_min_p: Optional[float] = typer.Option(HardAugmentConfig.resample_min_p, help="Resampling min-p."),
+    resample_repetition_penalty: float = typer.Option(
+        HardAugmentConfig.resample_repetition_penalty,
+        help="Resampling repetition penalty.",
+    ),
+    resample_api_model_name: str = typer.Option(HardAugmentConfig.resample_api_model_name, help="Resampling API model name."),
+    resample_api_base_url: str = typer.Option(HardAugmentConfig.resample_api_base_url, help="Resampling API base URL."),
+    resample_api_key_env: str = typer.Option(HardAugmentConfig.resample_api_key_env, help="Resampling API key env name."),
+    resample_api_timeout_seconds: float = typer.Option(HardAugmentConfig.resample_api_timeout_seconds, help="Resampling API timeout seconds."),
+    resample_api_max_concurrency: int = typer.Option(HardAugmentConfig.resample_api_max_concurrency, help="Resampling API max concurrency."),
+    resample_api_max_retries: int = typer.Option(HardAugmentConfig.resample_api_max_retries, help="Resampling API max retries."),
+    enable_api_repair: bool = typer.Option(HardAugmentConfig.enable_api_repair, help="Enable strong-model API repair on unresolved hard questions."),
+    repair_api_model_name: str = typer.Option(HardAugmentConfig.repair_api_model_name, help="Strong-model API name for hard repair."),
+    repair_api_base_url: str = typer.Option(HardAugmentConfig.repair_api_base_url, help="Strong-model API base URL."),
+    repair_api_key_env: str = typer.Option(HardAugmentConfig.repair_api_key_env, help="Strong-model API key env name."),
+    repair_api_timeout_seconds: float = typer.Option(HardAugmentConfig.repair_api_timeout_seconds, help="Strong-model API timeout seconds."),
+    repair_api_max_concurrency: int = typer.Option(HardAugmentConfig.repair_api_max_concurrency, help="Strong-model API max concurrency."),
+    repair_api_max_retries: int = typer.Option(HardAugmentConfig.repair_api_max_retries, help="Strong-model API max retries."),
+    repair_attempts_per_question: int = typer.Option(HardAugmentConfig.repair_attempts_per_question, help="Repair attempts per unresolved hard question."),
+    repair_max_new_tokens: int = typer.Option(HardAugmentConfig.repair_max_new_tokens, help="Repair max new tokens."),
+    repair_temperature: float = typer.Option(HardAugmentConfig.repair_temperature, help="Repair temperature."),
+    repair_top_p: float = typer.Option(HardAugmentConfig.repair_top_p, help="Repair top-p."),
+    primary_nli_model: str = typer.Option(NLIConfig.model_name, help="Primary NLI model for judging augmented answers."),
+    secondary_nli_model: Optional[str] = typer.Option(None, help="Optional secondary NLI model for judging augmented answers."),
+    nli_device: str = typer.Option(NLIConfig.device, help="NLI device for augmentation judgment."),
+    nli_batch_size: int = typer.Option(NLIConfig.batch_size, help="NLI batch size for augmentation judgment."),
+    nli_max_length: int = typer.Option(NLIConfig.max_length, help="NLI max length for augmentation judgment."),
+    nli_fp16: bool = typer.Option(NLIConfig.fp16, help="Whether to enable fp16 for augmentation NLI."),
+    reference_entail_threshold: float = typer.Option(JudgeConfig.reference_entail_threshold, help="Reference entail threshold."),
+    candidate_entail_threshold: float = typer.Option(JudgeConfig.candidate_entail_threshold, help="Candidate entail threshold."),
+    candidate_contradict_threshold: float = typer.Option(JudgeConfig.candidate_contradict_threshold, help="Candidate contradiction threshold."),
+    vote_mode: str = typer.Option(JudgeConfig.vote_mode, help="Vote mode: primary | and | or."),
+    qa_similarity_model_name: Optional[str] = typer.Option(
+        JudgeConfig.qa_similarity_model_name,
+        help="Sentence-Transformer model for QA consistency in augmentation judge. Use empty string to disable.",
+    ),
+    qa_similarity_min: float = typer.Option(JudgeConfig.qa_similarity_min, help="QA similarity threshold in augmentation judge."),
+    metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
+) -> None:
+    """Stage 4 (v2): answer-filter -> regroup -> hard augmentation -> pair selection."""
+
+    rows = list(read_jsonl(in_path))
+
+    answer_cfg = AnswerFilterConfig(
+        tokenizer_name=tokenizer_name,
+        min_answer_tokens=min_answer_tokens,
+        max_answer_tokens=max_answer_tokens,
+        max_answer_chars=max_answer_chars,
+        require_qa_consistent=require_qa_consistent,
+        require_reference_supported=require_reference_supported,
+        drop_prompt_leak=drop_prompt_leak,
+        drop_option_style=drop_option_style,
+    )
+    filtered_rows, answer_filter_metrics = apply_answer_filters(rows, answer_cfg)
+    if out_filtered_judged:
+        write_jsonl(out_filtered_judged, filtered_rows)
+
+    _, group_counts_initial = summarize_question_groups(filtered_rows)
+
+    need_augment = bool(extra_samples_per_hard > 0 or enable_api_repair)
+    judge: Optional[AnswerJudge] = None
+    if need_augment:
+        primary = NLIVerifier(
+            model_name=primary_nli_model,
+            device=nli_device,
+            batch_size=nli_batch_size,
+            max_length=nli_max_length,
+            fp16=nli_fp16,
+        )
+        secondary = None
+        if secondary_nli_model:
+            secondary = NLIVerifier(
+                model_name=secondary_nli_model,
+                device=nli_device,
+                batch_size=nli_batch_size,
+                max_length=nli_max_length,
+                fp16=nli_fp16,
+            )
+        qa_model_name = qa_similarity_model_name or None
+        judge_cfg = JudgeConfig(
+            reference_entail_threshold=reference_entail_threshold,
+            candidate_entail_threshold=candidate_entail_threshold,
+            candidate_contradict_threshold=candidate_contradict_threshold,
+            vote_mode=vote_mode,
+            qa_similarity_model_name=qa_model_name,
+            qa_similarity_min=qa_similarity_min,
+        )
+        judge = AnswerJudge(cfg=judge_cfg, primary_verifier=primary, secondary_verifier=secondary)
+
+    hard_cfg = HardAugmentConfig(
+        extra_samples_per_hard=extra_samples_per_hard,
+        resample_backend=resample_backend,
+        resample_model_name=resample_model_name,
+        resample_device=resample_device,
+        resample_batch_size=resample_batch_size,
+        resample_max_new_tokens=resample_max_new_tokens,
+        resample_temperature=resample_temperature,
+        resample_top_p=resample_top_p,
+        resample_top_k=resample_top_k,
+        resample_min_p=resample_min_p,
+        resample_repetition_penalty=resample_repetition_penalty,
+        resample_api_model_name=resample_api_model_name,
+        resample_api_base_url=resample_api_base_url,
+        resample_api_key_env=resample_api_key_env,
+        resample_api_timeout_seconds=resample_api_timeout_seconds,
+        resample_api_max_concurrency=resample_api_max_concurrency,
+        resample_api_max_retries=resample_api_max_retries,
+        enable_api_repair=enable_api_repair,
+        repair_api_model_name=repair_api_model_name,
+        repair_api_base_url=repair_api_base_url,
+        repair_api_key_env=repair_api_key_env,
+        repair_api_timeout_seconds=repair_api_timeout_seconds,
+        repair_api_max_concurrency=repair_api_max_concurrency,
+        repair_api_max_retries=repair_api_max_retries,
+        repair_attempts_per_question=repair_attempts_per_question,
+        repair_max_new_tokens=repair_max_new_tokens,
+        repair_temperature=repair_temperature,
+        repair_top_p=repair_top_p,
+    )
+
+    working_rows = list(filtered_rows)
+    resampled_rows: List[Dict[str, Any]] = []
+    resample_metrics: Dict[str, Any] = {"skipped": "augmentation_disabled"}
+    repaired_rows: List[Dict[str, Any]] = []
+    repair_metrics: Dict[str, Any] = {"skipped": "augmentation_disabled"}
+    group_counts_after_resample = dict(group_counts_initial)
+
+    if judge is not None:
+        resampled_rows, resample_metrics = resample_hard_answers(
+            rows=working_rows,
+            hard_cfg=hard_cfg,
+            answer_filter_cfg=answer_cfg,
+            judge=judge,
+        )
+        working_rows.extend(resampled_rows)
+        _, group_counts_after_resample = summarize_question_groups(working_rows)
+
+        repaired_rows, repair_metrics = repair_hard_with_api(
+            rows=working_rows,
+            hard_cfg=hard_cfg,
+            answer_filter_cfg=answer_cfg,
+            judge=judge,
+        )
+        working_rows.extend(repaired_rows)
+
+    dedup: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
+    for row in working_rows:
+        key = (str(row["id"]), int(row.get("sample_id", -1)), str(row.get("answer") or ""))
+        dedup[key] = row
+    working_rows = list(dedup.values())
+
+    _, group_counts_final = summarize_question_groups(working_rows)
+    if out_augmented_judged:
+        write_jsonl(out_augmented_judged, working_rows)
+
+    pair_cfg = PairSelectConfig(
+        drop_easy=drop_easy,
+        keep_unresolved_hard=keep_unresolved_hard,
+        hard_negative_entail_weight=hard_negative_entail_weight,
+        hard_negative_edit_proximity_weight=hard_negative_edit_proximity_weight,
+        hard_negative_length_proximity_weight=hard_negative_length_proximity_weight,
+    )
+    pairs, status_counts, _ = build_pairs_v2(working_rows, pair_cfg)
+    write_jsonl(out, pairs)
+
+    metrics = {
+        "num_input_rows": len(rows),
+        "answer_filter_metrics": answer_filter_metrics,
+        "group_counts_initial": group_counts_initial,
+        "resample_metrics": resample_metrics,
+        "num_resampled_rows_kept": len(resampled_rows),
+        "group_counts_after_resample": group_counts_after_resample,
+        "repair_metrics": repair_metrics,
+        "num_repaired_rows_kept": len(repaired_rows),
+        "group_counts_final": group_counts_final,
+        "num_augmented_judged_rows": len(working_rows),
+        "num_pair_rows": len(pairs),
+        "pair_status_counts": status_counts,
     }
     if metrics_out:
         write_json(metrics_out, metrics)
