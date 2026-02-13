@@ -2,4 +2,5 @@ data/
 outputs/
 .venv/
 .vscode/
+.deepeval
 **/__pycache__/

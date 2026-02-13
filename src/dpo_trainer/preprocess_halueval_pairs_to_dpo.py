@@ -1,12 +1,11 @@
 import argparse
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
 from transformers import AutoTokenizer
 
 from .halueval_common import (
-    SUPPORTED_SUBSETS,
     build_eval_item_from_raw_row,
     build_generation_prompt,
     get_pair_from_raw_row,
@@ -22,34 +21,55 @@ def token_len(tokenizer: AutoTokenizer, text: str) -> int:
     return len(tokenizer(text, add_special_tokens=False).input_ids)
 
 
-def _infer_eval_fields_from_meqng_row(row: Dict) -> Tuple[str, List[str], str]:
+def _normalize_contexts(value: Any) -> List[str]:
     """
-    Infer (eval_question, eval_contexts, plain_prompt) from a meqng row.
+    Normalize contexts field to a clean list of non-empty strings.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _infer_eval_fields_from_jsonl_row(row: Dict) -> Tuple[str, List[str], str]:
+    """
+    Infer (eval_question, eval_contexts, plain_prompt) from a local pair JSONL row.
 
     Priority:
-    1) Use explicit question/knowledge/prompt fields when present.
-    2) Best-effort parse from prompt with the canonical separator "\\nQuestion: ".
+    1) Use explicit eval fields (eval_question/eval_contexts) when present.
+    2) Use question/knowledge or question/contexts fields.
+    3) Best-effort parse from prompt with the canonical separator "\\nQuestion: ".
     """
     prompt = (row.get("prompt") or "").strip()
-    question = (row.get("question") or "").strip()
-    knowledge = (row.get("knowledge") or "").strip()
+    eval_question = (row.get("eval_question") or row.get("question") or "").strip()
+    eval_contexts = _normalize_contexts(row.get("eval_contexts"))
+    if not eval_contexts:
+        eval_contexts = _normalize_contexts(row.get("contexts"))
+    if not eval_contexts:
+        knowledge = (row.get("knowledge") or "").strip()
+        if knowledge:
+            eval_contexts = [knowledge]
 
-    if not question and prompt and "\nQuestion: " in prompt:
+    if not eval_question and prompt and "\nQuestion: " in prompt:
         left, right = prompt.rsplit("\nQuestion: ", 1)
-        knowledge = knowledge or left.strip()
-        question = right.strip()
+        if not eval_contexts and left.strip():
+            eval_contexts = [left.strip()]
+        eval_question = right.strip()
 
     if not prompt:
-        if knowledge and question:
-            prompt = f"{knowledge}\nQuestion: {question}"
+        if eval_contexts and eval_question:
+            prompt = f"{eval_contexts[0]}\nQuestion: {eval_question}"
+        elif eval_question:
+            prompt = eval_question
         else:
-            prompt = question or knowledge
+            prompt = "\n\n".join(eval_contexts)
 
-    contexts = [knowledge] if knowledge else []
-    return question, contexts, prompt
+    return eval_question, eval_contexts, prompt
 
 
-def convert_meqng_jsonl_to_dpo(
+def convert_pairs_jsonl_to_dpo(
     jsonl_path: str,
     tokenizer: AutoTokenizer,
     max_samples: Optional[int],
@@ -62,12 +82,12 @@ def convert_meqng_jsonl_to_dpo(
     default_task_label: str,
 ) -> Dataset:
     """
-    Convert meqng JSONL outputs into DPO format compatible with existing training/eval scripts.
+    Convert pair JSONL outputs into DPO format compatible with existing training/eval scripts.
 
     Expected core fields in each row:
-      - prompt / chosen / rejected
+      - chosen / rejected
     Optional fields used when available:
-      - id, source_id, task, question, knowledge, eval_question, eval_contexts
+      - id, source_id, task, prompt, question, knowledge, contexts, eval_question, eval_contexts
     """
     ds = load_dataset("json", data_files=jsonl_path, split="train").shuffle(seed=seed)
 
@@ -75,28 +95,14 @@ def convert_meqng_jsonl_to_dpo(
         chosen = (row.get("chosen") or "").strip()
         rejected = (row.get("rejected") or "").strip()
 
-        eval_question = (row.get("eval_question") or "").strip()
-        eval_contexts = row.get("eval_contexts") or []
-        if not isinstance(eval_contexts, list):
-            eval_contexts = [str(eval_contexts)]
-        eval_contexts = [str(x).strip() for x in eval_contexts if str(x).strip()]
-
-        if not eval_question or not eval_contexts:
-            q2, c2, prompt = _infer_eval_fields_from_meqng_row(row)
-            eval_question = eval_question or q2
-            eval_contexts = eval_contexts or c2
-        else:
-            prompt = (row.get("prompt") or "").strip()
-            if not prompt:
-                knowledge = eval_contexts[0] if eval_contexts else ""
-                prompt = f"{knowledge}\nQuestion: {eval_question}".strip()
+        eval_question, eval_contexts, prompt = _infer_eval_fields_from_jsonl_row(row)
 
         chat_prompt = to_chat_prompt(tokenizer, prompt, enable_thinking=enable_thinking)
         p_len = token_len(tokenizer, chat_prompt)
         c_len = token_len(tokenizer, chosen) if chosen else 0
         r_len = token_len(tokenizer, rejected) if rejected else 0
 
-        source_id = str(row.get("source_id") or row.get("id") or f"meqng:{idx}")
+        source_id = str(row.get("source_id") or row.get("id") or f"{default_task_label}:{idx}")
         task = str(row.get("task") or default_task_label)
 
         out = {
@@ -110,8 +116,23 @@ def convert_meqng_jsonl_to_dpo(
             "rejected": rejected,
         }
 
-        # Keep useful meqng provenance metadata when present.
-        for key in ("perturbator", "perturb_meta", "filter_meta", "filter_trace", "difficulty", "difficulty_bucket"):
+        # Keep useful provenance metadata when present.
+        for key in (
+            "perturbator",
+            "perturb_meta",
+            "filter_meta",
+            "filter_trace",
+            "pair_meta",
+            "chosen_origin",
+            "difficulty",
+            "difficulty_label",
+            "difficulty_bucket",
+            "rank_score",
+            "rank_components",
+            "trial_count",
+            "correct_count",
+            "accuracy",
+        ):
             if key in row:
                 out[key] = row[key]
 
@@ -153,6 +174,35 @@ def convert_meqng_jsonl_to_dpo(
     if not keep_chat_prompt:
         ds = ds.remove_columns(["chat_prompt"])
     return ds
+
+
+def convert_meqng_jsonl_to_dpo(
+    jsonl_path: str,
+    tokenizer: AutoTokenizer,
+    max_samples: Optional[int],
+    seed: int,
+    max_prompt_length: int,
+    max_length: int,
+    enable_thinking: bool,
+    keep_chat_prompt: bool,
+    keep_length_metadata: bool,
+    default_task_label: str,
+) -> Dataset:
+    """
+    Backward-compatible wrapper for legacy meqng naming.
+    """
+    return convert_pairs_jsonl_to_dpo(
+        jsonl_path=jsonl_path,
+        tokenizer=tokenizer,
+        max_samples=max_samples,
+        seed=seed,
+        max_prompt_length=max_prompt_length,
+        max_length=max_length,
+        enable_thinking=enable_thinking,
+        keep_chat_prompt=keep_chat_prompt,
+        keep_length_metadata=keep_length_metadata,
+        default_task_label=default_task_label,
+    )
 
 
 def convert_config_to_dpo(
@@ -293,8 +343,8 @@ def parse_args() -> argparse.Namespace:
         "--source",
         type=str,
         default="halueval",
-        choices=["halueval", "meqng"],
-        help="Input source type. halueval: load from HF raw subsets; meqng: load from local JSONL.",
+        choices=["halueval", "meqng", "ssqpg", "jsonl"],
+        help="Input source type. halueval: load from HF raw subsets; meqng/ssqpg/jsonl: load from local JSONL pairs.",
     )
 
     parser.add_argument(
@@ -304,16 +354,20 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated HaluEval subsets to include: dialogue,qa,summarization",
     )
     parser.add_argument(
+        "--pairs_jsonl",
         "--meqng_jsonl",
+        dest="pairs_jsonl",
         type=str,
         default=None,
-        help="Path to meqng JSONL (used when --source=meqng).",
+        help="Path to local pair JSONL (used when --source=meqng/ssqpg/jsonl).",
     )
     parser.add_argument(
+        "--pairs_task_label",
         "--meqng_task_label",
+        dest="pairs_task_label",
         type=str,
         default="qa",
-        help="Default task label for meqng rows when task field is absent.",
+        help="Default task label for local JSONL rows when task field is absent.",
     )
 
     parser.add_argument(
@@ -390,10 +444,10 @@ def main() -> None:
             parts.append(part)
         merged = concatenate_datasets(parts).shuffle(seed=args.seed)
     else:
-        if not args.meqng_jsonl:
-            raise ValueError("When --source=meqng, --meqng_jsonl is required.")
-        merged = convert_meqng_jsonl_to_dpo(
-            jsonl_path=args.meqng_jsonl,
+        if not args.pairs_jsonl:
+            raise ValueError("When --source is meqng/ssqpg/jsonl, --pairs_jsonl is required.")
+        merged = convert_pairs_jsonl_to_dpo(
+            jsonl_path=args.pairs_jsonl,
             tokenizer=tokenizer,
             max_samples=max_n,
             seed=args.seed,
@@ -402,7 +456,7 @@ def main() -> None:
             enable_thinking=args.enable_thinking,
             keep_chat_prompt=args.keep_chat_prompt,
             keep_length_metadata=args.keep_length_metadata,
-            default_task_label=args.meqng_task_label,
+            default_task_label=args.pairs_task_label,
         )
 
     ds_dict = split_dataset(
