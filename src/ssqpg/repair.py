@@ -8,7 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import RepairConfig
-from .nli import NLIVerifier
+from nli_judge.nli import NLIVerifier
 from .prompt import build_qa_premise, build_repair_prompt
 from .text import length_ratio, normalized_edit_distance, normalize_whitespace
 

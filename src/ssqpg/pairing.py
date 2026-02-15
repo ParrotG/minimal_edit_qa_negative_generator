@@ -12,6 +12,18 @@ def _support_score(row: Dict[str, Any]) -> float:
     return float(judge.get("candidate_entail_primary", 0.0))
 
 
+def _judge_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep a compact judge snapshot instead of copying the whole judge object."""
+
+    judge = row.get("judge") or {}
+    return {
+        "candidate_entail_primary": judge.get("candidate_entail_primary"),
+        "candidate_contradict_primary": judge.get("candidate_contradict_primary"),
+        "qa_similarity": judge.get("qa_similarity"),
+        "is_correct": judge.get("is_correct"),
+    }
+
+
 def _group_label(correct_count: int, wrong_count: int) -> str:
     if correct_count > 0 and wrong_count == 0:
         return "easy"
@@ -136,8 +148,8 @@ def build_pairs(rows: Sequence[Dict[str, Any]], cfg: PairSelectConfig) -> Tuple[
             rec["pair_meta"] = {
                 "chosen_sample_id": int(chosen_row.get("sample_id", -1)),
                 "rejected_sample_id": int(rejected_row.get("sample_id", -1)),
-                "chosen_judge": chosen_row.get("judge", {}),
-                "rejected_judge": rejected_row.get("judge", {}),
+                "chosen_judge_summary": _judge_summary(chosen_row),
+                "rejected_judge_summary": _judge_summary(rejected_row),
                 "negative_pair_score": neg_parts,
             }
         elif label == "easy":
@@ -150,7 +162,7 @@ def build_pairs(rows: Sequence[Dict[str, Any]], cfg: PairSelectConfig) -> Tuple[
                 rec["chosen_origin"] = "self_sample"
                 rec["pair_meta"] = {
                     "chosen_sample_id": int(chosen_row.get("sample_id", -1)),
-                    "chosen_judge": chosen_row.get("judge", {}),
+                    "chosen_judge_summary": _judge_summary(chosen_row),
                 }
         elif label == "hard":
             if cfg.keep_unresolved_hard:
@@ -159,7 +171,7 @@ def build_pairs(rows: Sequence[Dict[str, Any]], cfg: PairSelectConfig) -> Tuple[
                 rec["rejected"] = rejected_row["answer"]
                 rec["pair_meta"] = {
                     "rejected_sample_id": int(rejected_row.get("sample_id", -1)),
-                    "rejected_judge": rejected_row.get("judge", {}),
+                    "rejected_judge_summary": _judge_summary(rejected_row),
                 }
             else:
                 rec["status"] = "drop_hard"

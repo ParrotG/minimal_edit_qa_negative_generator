@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Optional
 
+from nli_judge.prompt import build_qa_premise as _build_nli_qa_premise
+
 
 def build_qa_premise(knowledge: str, question: str) -> str:
     """Build the canonical QA premise used by NLI verification and DPO prompt."""
 
-    return f"{knowledge}\nQuestion: {question}"
+    return _build_nli_qa_premise(knowledge=knowledge, question=question)
 
 
 def build_qa_answer_prefix(knowledge: str, question: str) -> str:

@@ -26,6 +26,7 @@ attack = ["textattack>=0.3.10"]
 [project.scripts]
 meqng = "meqng.cli:app"
 ssqpg = "ssqpg.cli:app"
+nli-verifier = "nli_judge.verifier:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

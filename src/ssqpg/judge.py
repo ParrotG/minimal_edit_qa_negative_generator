@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from sentence_transformers import SentenceTransformer, util
 
 from .config import JudgeConfig
-from .nli import NLIVerifier, NLIScores
+from nli_judge.nli import NLIVerifier, NLIScores
 from .prompt import build_qa_premise
 
 

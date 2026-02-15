@@ -17,7 +17,6 @@ from .config import (
     HardAugmentConfig,
     HaluEvalSourceConfig,
     JudgeConfig,
-    NLIConfig,
     PairFilterConfig,
     PairSelectConfig,
     RepairConfig,
@@ -30,7 +29,8 @@ from .generation import ApiSelfSampler, SelfSampler
 from .hard_augment import repair_hard_with_api, resample_hard_answers
 from .io import read_jsonl, write_json, write_jsonl
 from .judge import AnswerJudge
-from .nli import NLIVerifier
+from nli_judge.config import NLIConfig
+from nli_judge.nli import NLIVerifier
 from .pairing import build_pairs, summarize_question_groups
 from .repair import MinimalEditRepairer
 

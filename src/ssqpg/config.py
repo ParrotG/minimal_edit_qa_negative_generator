@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from nli_judge.config import NLIConfig
 
 @dataclass(frozen=True)
 class HaluEvalSourceConfig:
@@ -61,17 +62,6 @@ class GenerationConfig:
     api_retry_backoff_base: float = 0.5
     api_retry_backoff_max: float = 8.0
     seed: int = 42
-
-
-@dataclass(frozen=True)
-class NLIConfig:
-    """NLI verifier configuration."""
-
-    model_name: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
-    device: str = "cuda"
-    batch_size: int = 16
-    max_length: int = 512
-    fp16: bool = True
 
 
 @dataclass(frozen=True)

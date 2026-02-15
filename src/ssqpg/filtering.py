@@ -7,7 +7,7 @@ from sentence_transformers import SentenceTransformer, util
 
 from .config import PairFilterConfig
 from .ner import NERTagger, extract_numbers
-from .nli import NLIVerifier
+from nli_judge.nli import NLIVerifier
 from .text import length_ratio, normalized_edit_distance
 from .prompt import build_qa_premise
 
@@ -123,7 +123,7 @@ def apply_pair_filters(
 
         ratio = length_ratio(chosen, rejected)
         keep_len = cfg.min_length_ratio <= ratio <= cfg.max_length_ratio
-        trace.append({"filter": "length_ratio", "keep": keep_len, "reason": "ok" if keep_len else "ratio_out_of_range", "meta": {"ratio": ratio}})
+        trace.append({"filter": "length_ratio", "keep": keep_len, "reason": "ok" if keep_len else "ratio_out_of_range"})
         if not keep_len:
             counts["drop_length"] += 1
             continue
@@ -131,7 +131,7 @@ def apply_pair_filters(
 
         norm = normalized_edit_distance(chosen, rejected)
         keep_edit = cfg.min_norm_edit <= norm <= cfg.max_norm_edit
-        trace.append({"filter": "edit_distance", "keep": keep_edit, "reason": "ok" if keep_edit else "edit_out_of_range", "meta": {"norm": norm}})
+        trace.append({"filter": "edit_distance", "keep": keep_edit, "reason": "ok" if keep_edit else "edit_out_of_range"})
         if not keep_edit:
             counts["drop_edit"] += 1
             continue
@@ -141,7 +141,7 @@ def apply_pair_filters(
             ok_chosen = _answer_type_ok(row["question"], chosen, ner)
             ok_rejected = _answer_type_ok(row["question"], rejected, ner)
             keep_type = bool(ok_chosen and ok_rejected)
-            trace.append({"filter": "answer_type", "keep": keep_type, "reason": "ok" if keep_type else "answer_type_mismatch", "meta": {"chosen_ok": ok_chosen, "rejected_ok": ok_rejected}})
+            trace.append({"filter": "answer_type", "keep": keep_type, "reason": "ok" if keep_type else "answer_type_mismatch"})
             if not keep_type:
                 counts["drop_answer_type"] += 1
                 continue
@@ -156,14 +156,6 @@ def apply_pair_filters(
                 "filter": "nli",
                 "keep": keep_nli,
                 "reason": "ok" if keep_nli else "nli_not_flipped",
-                "meta": {
-                    "chosen_entail": pos.entail,
-                    "chosen_neutral": pos.neutral,
-                    "chosen_contradict": pos.contradict,
-                    "rejected_entail": neg.entail,
-                    "rejected_neutral": neg.neutral,
-                    "rejected_contradict": neg.contradict,
-                },
             }
         )
         if not keep_nli:
@@ -189,7 +181,6 @@ def apply_pair_filters(
                     "filter": "qa_consistency",
                     "keep": keep_qa,
                     "reason": "ok" if keep_qa else "qa_semantic_shifted",
-                    "meta": {"similarity": sim, "min_similarity": cfg.qa_similarity_min},
                 }
             )
             if not keep_qa:

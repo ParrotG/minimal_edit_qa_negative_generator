@@ -29,13 +29,15 @@ except ImportError:  # pragma: no cover - compatibility fallback for editable in
     )
 
 try:
-    from src.ssqpg.config import JudgeConfig, NLIConfig
+    from src.ssqpg.config import JudgeConfig
     from src.ssqpg.judge import AnswerJudge
-    from src.ssqpg.nli import NLIVerifier
+    from nli_judge.config import NLIConfig
+    from nli_judge.nli import NLIVerifier
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
-    from ssqpg.config import JudgeConfig, NLIConfig
+    from ssqpg.config import JudgeConfig
     from ssqpg.judge import AnswerJudge
-    from ssqpg.nli import NLIVerifier
+    from nli_judge.config import NLIConfig
+    from nli_judge.nli import NLIVerifier
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()

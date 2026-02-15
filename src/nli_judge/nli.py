@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from .config import NLIConfig
+
 
 @dataclass(frozen=True)
 class NLIScores:
@@ -21,11 +23,11 @@ class NLIVerifier:
 
     def __init__(
         self,
-        model_name: str,
-        device: str = "cuda",
-        batch_size: int = 16,
-        max_length: int = 512,
-        fp16: bool = True,
+        model_name: str = NLIConfig.model_name,
+        device: str = NLIConfig.device,
+        batch_size: int = NLIConfig.batch_size,
+        max_length: int = NLIConfig.max_length,
+        fp16: bool = NLIConfig.fp16,
     ) -> None:
         self.model_name = model_name
         self.device = device
