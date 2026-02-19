@@ -11,8 +11,6 @@ class UnifiedLLMConfig:
     # Model loading defaults.
     base_model_name: str = "Qwen/Qwen3-0.6B"
     lora_path: Optional[str] = None
-    lora_is_merged: bool = False
-    merge_lora: bool = False
     tokenizer_name_or_path: Optional[str] = None
     device: str = "cuda"
     device_map: Optional[str] = "auto"

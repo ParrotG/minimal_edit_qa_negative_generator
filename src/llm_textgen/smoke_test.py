@@ -11,8 +11,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Single-run smoke test for unified LLM text generation.")
     parser.add_argument("--base_model_name", type=str, default=UnifiedLLMConfig.base_model_name)
     parser.add_argument("--lora_path", type=str, default=None)
-    parser.add_argument("--lora_is_merged", action="store_true")
-    parser.add_argument("--merge_lora", action="store_true")
     parser.add_argument("--device", type=str, default=UnifiedLLMConfig.device)
     parser.add_argument("--device_map", type=str, default=UnifiedLLMConfig.device_map)
 
@@ -40,8 +38,6 @@ def run_smoke_test(args: argparse.Namespace) -> int:
     cfg = UnifiedLLMConfig(
         base_model_name=args.base_model_name,
         lora_path=args.lora_path,
-        lora_is_merged=bool(args.lora_is_merged),
-        merge_lora=bool(args.merge_lora),
         device=args.device,
         device_map=args.device_map,
         batch_size=args.batch_size,

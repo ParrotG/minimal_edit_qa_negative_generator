@@ -17,7 +17,6 @@ class GeneratorModelSpec:
     step: int
     display_name: str
     lora_path: Optional[str]
-    lora_is_merged: bool
 
 
 def _discover_checkpoints(path: str) -> List[Tuple[int, str]]:
@@ -56,11 +55,9 @@ def build_generator_model_specs(
     base_model_name: str,
     lora_ckpt_path: Optional[str] = None,
     lora_ckpt_list_path: Optional[str] = None,
-    lora_is_merged: bool = False,
-    lora_list_are_merged: bool = False,
     include_base: bool = True,
 ) -> List[GeneratorModelSpec]:
-    """Build model specs from base model and optional LoRA or checkpoint list."""
+    """Build model specs from base model and optional LoRA adapter checkpoint(s)."""
 
     if lora_ckpt_path and lora_ckpt_list_path:
         raise ValueError("--lora_ckpt_path and --lora_ckpt_list_path are mutually exclusive.")
@@ -73,7 +70,6 @@ def build_generator_model_specs(
                 step=0,
                 display_name=base_model_name,
                 lora_path=None,
-                lora_is_merged=False,
             )
         )
 
@@ -84,7 +80,6 @@ def build_generator_model_specs(
                 step=0,
                 display_name=lora_ckpt_path,
                 lora_path=lora_ckpt_path,
-                lora_is_merged=bool(lora_is_merged),
             )
         )
         return specs
@@ -100,7 +95,6 @@ def build_generator_model_specs(
                     step=int(step),
                     display_name=ckpt_path,
                     lora_path=ckpt_path,
-                    lora_is_merged=bool(lora_list_are_merged),
                 )
             )
         return specs
@@ -114,7 +108,6 @@ def load_generator_from_spec(
     *,
     spec: GeneratorModelSpec,
     base_model_name: str,
-    merge_lora: bool = False,
     batch_size: int = 4,
     max_new_tokens: int = 256,
     temperature: float = 0.0,
@@ -133,8 +126,6 @@ def load_generator_from_spec(
     cfg = UnifiedLLMConfig(
         base_model_name=base_model_name,
         lora_path=spec.lora_path,
-        lora_is_merged=bool(spec.lora_is_merged),
-        merge_lora=bool(merge_lora),
         batch_size=batch_size,
         max_new_tokens=max_new_tokens,
         temperature=temperature,

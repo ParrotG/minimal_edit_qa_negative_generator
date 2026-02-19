@@ -88,9 +88,7 @@ class UnifiedTextGenerator:
         self,
         *,
         base_model_name: Optional[str] = None,
-        lora_path_or_model_dir: Optional[str] = None,
-        lora_is_merged: Optional[bool] = None,
-        merge_lora: Optional[bool] = None,
+        lora_path: Optional[str] = None,
         tokenizer_name_or_path: Optional[str] = None,
         device_map: Optional[str] = None,
     ) -> None:
@@ -99,14 +97,11 @@ class UnifiedTextGenerator:
 
         Modes:
         - Base model only
-        - LoRA merged model directory
         - PEFT LoRA adapter over base model
         """
 
         resolved_base_model = self._resolve(base_model_name, self.config.base_model_name)
-        resolved_lora_path = self._resolve(lora_path_or_model_dir, self.config.lora_path)
-        resolved_lora_is_merged = bool(self._resolve(lora_is_merged, self.config.lora_is_merged))
-        resolved_merge_lora = bool(self._resolve(merge_lora, self.config.merge_lora))
+        resolved_lora_path = self._resolve(lora_path, self.config.lora_path)
         resolved_device_map = self._resolve(device_map, self.config.device_map)
         resolved_tokenizer = self._resolve(tokenizer_name_or_path, self.config.tokenizer_name_or_path)
 
@@ -114,13 +109,6 @@ class UnifiedTextGenerator:
             tokenizer_source = resolved_tokenizer or resolved_base_model
             self.tokenizer = self._load_tokenizer(tokenizer_source)
             self.model = self._load_causal_lm(resolved_base_model, resolved_device_map)
-            self._set_seed(self.config.seed)
-            return
-
-        if resolved_lora_is_merged:
-            tokenizer_source = resolved_tokenizer or resolved_lora_path
-            self.tokenizer = self._load_tokenizer(tokenizer_source)
-            self.model = self._load_causal_lm(resolved_lora_path, resolved_device_map)
             self._set_seed(self.config.seed)
             return
 
@@ -133,8 +121,6 @@ class UnifiedTextGenerator:
             raise ImportError("LoRA adapter loading requires `peft` to be installed.") from exc
 
         model = PeftModel.from_pretrained(base_model, resolved_lora_path)
-        if resolved_merge_lora:
-            model = model.merge_and_unload()
         model.eval()
         self.model = model
         self._set_seed(self.config.seed)
