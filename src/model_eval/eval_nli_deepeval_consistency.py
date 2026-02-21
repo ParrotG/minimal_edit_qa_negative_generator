@@ -5,14 +5,12 @@ import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
-    from src.ssqpg.config import JudgeConfig
-    from src.ssqpg.judge import AnswerJudge
-    from nli_judge.config import NLIConfig
+    from nli_judge.config import JudgeConfig, NLIConfig
+    from nli_judge.judge import AnswerJudge
     from nli_judge.nli import NLIVerifier
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
-    from ssqpg.config import JudgeConfig
-    from ssqpg.judge import AnswerJudge
-    from nli_judge.config import NLIConfig
+    from nli_judge.config import JudgeConfig, NLIConfig
+    from nli_judge.judge import AnswerJudge
     from nli_judge.nli import NLIVerifier
 
 from .common import group_rows_by_model, load_dataset_split, normalize_list, safe_int, write_csv, write_jsonl
@@ -364,4 +362,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

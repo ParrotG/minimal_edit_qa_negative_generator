@@ -5,11 +5,11 @@ import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
-    from src.ssqpg.prompt import build_qa_premise
+    from nli_judge.prompt import build_qa_premise
     from nli_judge.config import NLIConfig
     from nli_judge.nli import NLIVerifier
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
-    from ssqpg.prompt import build_qa_premise
+    from nli_judge.prompt import build_qa_premise
     from nli_judge.config import NLIConfig
     from nli_judge.nli import NLIVerifier
 
@@ -342,4 +342,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

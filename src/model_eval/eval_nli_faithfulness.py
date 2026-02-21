@@ -4,14 +4,12 @@ import argparse
 from typing import Any, Dict, List
 
 try:
-    from src.ssqpg.config import JudgeConfig
-    from src.ssqpg.judge import AnswerJudge
-    from nli_judge.config import NLIConfig
+    from nli_judge.config import JudgeConfig, NLIConfig
+    from nli_judge.judge import AnswerJudge
     from nli_judge.nli import NLIVerifier
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
-    from ssqpg.config import JudgeConfig
-    from ssqpg.judge import AnswerJudge
-    from nli_judge.config import NLIConfig
+    from nli_judge.config import JudgeConfig, NLIConfig
+    from nli_judge.judge import AnswerJudge
     from nli_judge.nli import NLIVerifier
 
 from .common import group_rows_by_model, load_generated_rows, write_csv, write_jsonl

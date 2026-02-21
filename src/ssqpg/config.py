@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from nli_judge.config import NLIConfig
+from nli_judge.config import JudgeConfig, NLIConfig
 
 @dataclass(frozen=True)
 class HaluEvalSourceConfig:
@@ -62,18 +62,6 @@ class GenerationConfig:
     api_retry_backoff_base: float = 0.5
     api_retry_backoff_max: float = 8.0
     seed: int = 42
-
-
-@dataclass(frozen=True)
-class JudgeConfig:
-    """Judgment thresholds and optional semantic consistency constraints."""
-
-    reference_entail_threshold: float = 0.60
-    candidate_entail_threshold: float = 0.45
-    candidate_contradict_threshold: float = 0.90
-    vote_mode: str = "primary"  # primary | and | or
-    qa_similarity_model_name: Optional[str] = "sentence-transformers/all-MiniLM-L6-v2"
-    qa_similarity_min: float = 0.65
 
 
 @dataclass(frozen=True)
