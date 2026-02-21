@@ -204,7 +204,7 @@ def main() -> None:
     write_csv(curve_rows, args.out_csv)
     print(f"Saved: {args.out_csv}")
 
-    write_jsonl(all_rows, args.out_jsonl)
+    write_jsonl(args.out_jsonl, all_rows)
     print(f"Saved: {args.out_jsonl}")
 
 

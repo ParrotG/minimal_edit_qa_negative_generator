@@ -139,7 +139,7 @@ def main() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    write_jsonl(generated_rows, args.out_jsonl)
+    write_jsonl(args.out_jsonl, generated_rows)
     print(f"Saved generated answers to: {args.out_jsonl}")
 
 

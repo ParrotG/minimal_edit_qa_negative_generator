@@ -131,28 +131,6 @@ class HardAugmentConfig:
 
 
 @dataclass(frozen=True)
-class RepairConfig:
-    """Configuration for minimal-edit repair on hard samples."""
-
-    model_name: str = "Qwen/Qwen3-4B-Instruct"
-    device: str = "cuda"
-    batch_size: int = 2
-    max_new_tokens: int = 256
-    attempts_per_record: int = 4
-    temperature: float = 0.7
-    top_p: float = 0.95
-    top_k: int = 50
-    repetition_penalty: float = 1.0
-    entail_threshold: float = 0.60
-    min_norm_edit: float = 0.01
-    max_norm_edit: float = 0.35
-    min_length_ratio: float = 0.75
-    max_length_ratio: float = 1.35
-    fallback_to_reference: bool = False
-    seed: int = 42
-
-
-@dataclass(frozen=True)
 class PairFilterConfig:
     """Filtering configuration for final DPO pair export."""
 

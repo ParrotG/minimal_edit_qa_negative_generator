@@ -19,7 +19,6 @@ from .config import (
     HaluEvalSourceConfig,
     PairFilterConfig,
     PairSelectConfig,
-    RepairConfig,
     SourceLengthConfig,
 )
 from .dataset import filter_source_by_length, iter_halueval_source, iter_jsonl_source, source_to_json
@@ -31,7 +30,6 @@ from nli_judge.config import JudgeConfig, NLIConfig
 from nli_judge.judge import AnswerJudge
 from nli_judge.nli import NLIVerifier
 from .pairing import build_pairs, summarize_question_groups
-from .repair import MinimalEditRepairer
 
 
 app = typer.Typer(add_completion=False)
@@ -41,7 +39,6 @@ source_app = typer.Typer()
 generate_app = typer.Typer()
 judge_app = typer.Typer()
 pair_app = typer.Typer()
-repair_app = typer.Typer()
 filter_app = typer.Typer()
 audit_app = typer.Typer()
 bucket_app = typer.Typer()
@@ -50,7 +47,6 @@ app.add_typer(source_app, name="source")
 app.add_typer(generate_app, name="generate")
 app.add_typer(judge_app, name="judge")
 app.add_typer(pair_app, name="pair")
-app.add_typer(repair_app, name="repair")
 app.add_typer(filter_app, name="filter")
 app.add_typer(audit_app, name="audit")
 app.add_typer(bucket_app, name="bucket")
@@ -582,72 +578,6 @@ def pair_build(
     console.print_json(json.dumps(metrics))
 
 
-@repair_app.command("hard")
-def repair_hard(
-    in_path: str = typer.Option(..., help="Input pair-level JSONL path."),
-    out: str = typer.Option(..., help="Output repaired pair-level JSONL path."),
-    repair_model_name: str = typer.Option(RepairConfig.model_name, help="Repair model name."),
-    repair_device: str = typer.Option(RepairConfig.device, help="Repair model device."),
-    repair_batch_size: int = typer.Option(RepairConfig.batch_size, help="Repair generation batch size."),
-    max_new_tokens: int = typer.Option(RepairConfig.max_new_tokens, help="Max new tokens for repair generation."),
-    attempts_per_record: int = typer.Option(RepairConfig.attempts_per_record, help="Repair attempts per hard record."),
-    temperature: float = typer.Option(RepairConfig.temperature, help="Repair sampling temperature."),
-    top_p: float = typer.Option(RepairConfig.top_p, help="Repair top-p."),
-    top_k: int = typer.Option(RepairConfig.top_k, help="Repair top-k."),
-    repetition_penalty: float = typer.Option(RepairConfig.repetition_penalty, help="Repair repetition penalty."),
-    entail_threshold: float = typer.Option(RepairConfig.entail_threshold, help="Repair NLI entail threshold."),
-    min_norm_edit: float = typer.Option(RepairConfig.min_norm_edit, help="Min normalized edit vs rejected."),
-    max_norm_edit: float = typer.Option(RepairConfig.max_norm_edit, help="Max normalized edit vs rejected."),
-    min_length_ratio: float = typer.Option(RepairConfig.min_length_ratio, help="Min repaired/rejected length ratio."),
-    max_length_ratio: float = typer.Option(RepairConfig.max_length_ratio, help="Max repaired/rejected length ratio."),
-    fallback_to_reference: bool = typer.Option(RepairConfig.fallback_to_reference, help="Fallback to reference if repair fails."),
-    seed: int = typer.Option(RepairConfig.seed, help="Repair random seed."),
-    nli_model: str = typer.Option(NLIConfig.model_name, help="NLI model for repair validation."),
-    nli_device: str = typer.Option(NLIConfig.device, help="NLI device for repair validation."),
-    nli_batch_size: int = typer.Option(NLIConfig.batch_size, help="NLI batch size for repair validation."),
-    nli_max_length: int = typer.Option(NLIConfig.max_length, help="NLI max length for repair validation."),
-    nli_fp16: bool = typer.Option(NLIConfig.fp16, help="Whether to enable fp16 for repair NLI on CUDA."),
-    metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
-) -> None:
-    """Stage 5: repair hard records with minimal edits validated by NLI."""
-
-    rows = list(read_jsonl(in_path))
-    verifier = NLIVerifier(
-        model_name=nli_model,
-        device=nli_device,
-        batch_size=nli_batch_size,
-        max_length=nli_max_length,
-        fp16=nli_fp16,
-    )
-    cfg = RepairConfig(
-        model_name=repair_model_name,
-        device=repair_device,
-        batch_size=repair_batch_size,
-        max_new_tokens=max_new_tokens,
-        attempts_per_record=attempts_per_record,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-        repetition_penalty=repetition_penalty,
-        entail_threshold=entail_threshold,
-        min_norm_edit=min_norm_edit,
-        max_norm_edit=max_norm_edit,
-        min_length_ratio=min_length_ratio,
-        max_length_ratio=max_length_ratio,
-        fallback_to_reference=fallback_to_reference,
-        seed=seed,
-    )
-    repairer = MinimalEditRepairer(cfg=cfg, verifier=verifier)
-    repaired_rows, metrics = repairer.repair(rows)
-    write_jsonl(out, repaired_rows)
-
-    if metrics_out:
-        write_json(metrics_out, metrics)
-
-    console.print(f"Saved {len(repaired_rows)} repaired rows to {out}")
-    console.print_json(json.dumps(metrics))
-
-
 @filter_app.command("apply")
 def filter_apply(
     in_path: str = typer.Option(..., help="Input pair-level JSONL path."),
@@ -676,7 +606,7 @@ def filter_apply(
     ),
     metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
 ) -> None:
-    """Stage 6: final pair filtering and export for downstream DPO preprocessing."""
+    """Stage 5: final pair filtering and export for downstream DPO preprocessing."""
 
     rows = list(read_jsonl(in_path))
     verifier = NLIVerifier(
@@ -720,7 +650,7 @@ def audit_surface(
     out: str = typer.Option(..., help="Output audit JSON path."),
     separability_threshold: float = typer.Option(AuditConfig.separability_threshold, help="Flag threshold for feature separability."),
 ) -> None:
-    """Stage 7: run a lightweight surface-signal separability audit."""
+    """Stage 6: run a lightweight surface-signal separability audit."""
 
     rows = list(read_jsonl(in_path))
     cfg = AuditConfig(separability_threshold=separability_threshold)
@@ -744,7 +674,7 @@ def bucket_difficulty(
     medium_max_delta: float = typer.Option(DifficultyConfig.medium_max_delta, help="Medium bucket upper bound for delta."),
     metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
 ) -> None:
-    """Stage 8: assign easy/medium/hard buckets using policy log-prob gaps."""
+    """Stage 7: assign easy/medium/hard buckets using policy log-prob gaps."""
 
     rows = list(read_jsonl(in_path))
     cfg = DifficultyConfig(

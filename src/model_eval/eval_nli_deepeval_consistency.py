@@ -357,7 +357,7 @@ def main() -> None:
     write_csv(summary_rows, args.out_csv)
     print(f"Saved summary: {args.out_csv}")
 
-    write_jsonl(sample_rows, args.out_jsonl)
+    write_jsonl(args.out_jsonl, sample_rows)
     print(f"Saved per-sample comparison: {args.out_jsonl}")
 
 

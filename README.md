@@ -1,127 +1,124 @@
-# minimal_edit_qa_negative_generator (meqng)
+# minimal_edit_qa_negative_generator
 
-This repository contains a **data construction** pipeline for building **minimal-edit negative answers** for evidence-grounded QA,
-intended for downstream preference training (e.g., DPO) in a separate training repo.
+Primary pipeline: `ssqpg`  
+Legacy route kept for compatibility: `meqng` (not the active research path).
 
-## Setup
+## Environment Setup (uv)
+
+### 1) Create and sync environment
 
 ```bash
-python -m venv .venv
+uv venv --python 3.11 .venv
 source .venv/bin/activate
-pip install -U pip
-pip install -e .
+uv sync
+```
+
+### 2) Required runtime assets
+
+```bash
 python -m spacy download en_core_web_trf
 ```
 
-Optional grammar filtering:
+### 3) Optional extras (install only when needed)
 
 ```bash
-pip install -e ".[grammar]"
+# LoRA adapter loading in llm_textgen
+uv sync --extra lora
+
+# DeepEval-based evaluation scripts in model_eval
+uv sync --extra eval
+
+# Legacy optional components (old route)
+uv sync --extra grammar --extra attack
 ```
 
-Optional TextAttack-based perturbation:
+## Primary Pipeline (`ssqpg`)
+
+The project is stage-driven. Run each stage explicitly and keep intermediate JSONL/JSON metrics.
+
+### Stage 1: Source sampling
 
 ```bash
-pip install -e ".[attack]"
+ssqpg source sample \
+  --out data/processed/source.jsonl \
+  --source halueval \
+  --max-samples 5000 \
+  --include-reference-answer true
 ```
 
-## Stage 1: Sanity check (HaluEval QA) + entity bank
-
-Sanity check measures whether an NLI verifier agrees with the dataset's `right_answer` vs `hallucinated_answer`.
+### Stage 2: Self-sampled answer generation
 
 ```bash
-meqng halu sanity-check --out data/metrics/nli_sanity.json --max-samples 2000
-meqng halu build-entity-bank --out data/artifacts/entity_bank.json --max-samples 20000
+ssqpg generate answers \
+  --in-path data/processed/source.jsonl \
+  --out data/processed/generated.jsonl \
+  --backend local \
+  --model-name Qwen/Qwen3-0.6B \
+  --num-samples-per-question 6
 ```
 
-## Stage 2: Sampling
+### Stage 3: NLI-based answer judgment
 
 ```bash
-meqng halu sample   --out data/processed/sampled.jsonl   --max-samples 5000   --max-prompt-tokens 768   --max-total-tokens 1024
+ssqpg judge answers \
+  --in-path data/processed/generated.jsonl \
+  --out data/processed/judged.jsonl
 ```
 
-## Stage 3: Perturbation (candidate generation)
+### Stage 4: Pair building with hard-question augmentation
 
 ```bash
-meqng perturb generate   --in-path data/processed/sampled.jsonl   --entity-bank data/artifacts/entity_bank.json   --out data/processed/candidates.jsonl   --max-candidates-per-sample 6
+ssqpg pair build \
+  --in-path data/processed/judged.jsonl \
+  --out data/processed/pairs.jsonl \
+  --out-augmented-judged data/processed/judged_augmented.jsonl \
+  --extra-samples-per-hard 0 \
+  --enable-api-repair true
 ```
 
-Enable TextAttack perturbator + repeated attempts:
+### Stage 5: Final pair filtering (DPO-ready)
 
 ```bash
-meqng perturb generate \
-  --in-path data/processed/sampled.jsonl \
-  --entity-bank data/artifacts/entity_bank.json \
-  --out data/processed/candidates.jsonl \
-  --max-candidates-per-sample 6 \
-  --attempts-per-perturbator 2 \
-  --enable-textattack true \
-  --textattack-augmenter embedding \
-  --textattack-search-calls 6 \
-  --textattack-entail-threshold-neg 0.35 \
-  --textattack-contradiction-ratio 0.50
+ssqpg filter apply \
+  --in-path data/processed/pairs.jsonl \
+  --out data/processed/dpo_pairs.jsonl
 ```
 
-Enable lightweight span-level perturbation (`span_drop`):
+### Stage 6: Surface-signal audit
 
 ```bash
-meqng perturb generate \
-  --in-path data/processed/sampled.jsonl \
-  --entity-bank data/artifacts/entity_bank.json \
-  --out data/processed/candidates.jsonl \
-  --enable-span-drop true \
-  --span-drop-min-words 2 \
-  --span-drop-max-words 6
-```
-
-## Stage 4: Filtering + final DPO pairs export
-
-```bash
-meqng filter apply   --in-path data/processed/candidates.jsonl   --out data/processed/dpo_pairs.jsonl   --max-per-sample 1
-```
-
-Enable ranking + optional grammar + difficulty bucket assignment in one run:
-
-```bash
-meqng filter apply \
-  --in-path data/processed/candidates.jsonl \
-  --out data/processed/dpo_pairs.jsonl \
-  --ranking-strategy heuristic \
-  --enable-qa-consistency-filter true \
-  --qa-similarity-min 0.70 \
-  --enable-grammar-filter false \
-  --enable-difficulty-bucket true \
-  --difficulty-model-name Qwen/Qwen3-0.6B \
-  --difficulty-hard-max-delta 0.10 \
-  --difficulty-medium-max-delta 0.60 \
-  --max-per-sample 1
-```
-
-## Stage 5: Difficulty bucketing only (standalone)
-
-```bash
-meqng filter bucket \
+ssqpg audit surface \
   --in-path data/processed/dpo_pairs.jsonl \
-  --out data/processed/dpo_pairs_bucketed.jsonl \
-  --difficulty-model-name Qwen/Qwen3-0.6B
+  --out data/metrics/surface_audit.json
 ```
 
-## Standalone component testing
-
-Run a perturbator on a single example:
+### Stage 7: Difficulty bucketing
 
 ```bash
-meqng perturb one --perturbator entity_swap --knowledge "..." --question "..." --answer "..." --entity-bank data/artifacts/entity_bank.json
-meqng perturb one --perturbator span_drop --knowledge "..." --question "..." --answer "..."
-meqng perturb one --perturbator textattack_nli_flip --knowledge "..." --question "..." --answer "..." --enable-textattack true
+ssqpg bucket difficulty \
+  --in-path data/processed/dpo_pairs.jsonl \
+  --out data/processed/dpo_pairs_bucketed.jsonl
 ```
 
-Run filters on a single candidate:
+## Evaluation Utilities (`model_eval`)
+
+`model_eval` scripts are decoupled tools for:
+- answer generation across base/LoRA checkpoints
+- NLI faithfulness evaluation
+- DeepEval hallucination scoring
+- NLI/DeepEval consistency analysis
+- threshold search and pairwise preference curves
+
+Run them from source, for example:
 
 ```bash
-meqng filter one --knowledge "..." --question "..." --chosen "..." --candidate "..."
+python -m src.model_eval.generate_answers --help
+python -m src.model_eval.eval_nli_faithfulness --help
+python -m src.model_eval.eval_deepeval_hallucination --help
 ```
 
-Notes:
-- The pipeline is intentionally **stage-driven**. No command automatically runs all stages end-to-end.
-- All intermediate artifacts are JSON/JSONL for easy debugging and recomposition.
+## Notes on Naming
+
+- Package name remains `meqng` to avoid environment breakage.
+- Current active implementation is `ssqpg`.
+- Legacy `meqng` code is preserved but not the primary research route.

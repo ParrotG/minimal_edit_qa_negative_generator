@@ -337,7 +337,7 @@ def main() -> None:
     write_csv(grid_rows, args.out_csv)
     print(f"Saved search grid: {args.out_csv}")
 
-    write_jsonl(best_rows, args.out_jsonl)
+    write_jsonl(args.out_jsonl, best_rows)
     print(f"Saved best thresholds: {args.out_jsonl}")
 
 

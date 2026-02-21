@@ -139,7 +139,7 @@ def main() -> None:
     print(f"Saved metrics to: {args.metrics_out}")
 
     if args.details_out:
-        write_jsonl(details, args.details_out)
+        write_jsonl(args.details_out, details)
         print(f"Saved details to: {args.details_out}")
 
 
