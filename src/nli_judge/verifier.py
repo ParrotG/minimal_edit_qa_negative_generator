@@ -1,62 +1,25 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
-import orjson
 import typer
 from rich.console import Console
 
+from dataio import optional_str, read_jsonl_list, require_non_empty_str, write_json, write_jsonl
 from .config import NLIConfig
 from .nli import NLIVerifier
-from .prompt import build_qa_premise
+from prompt import build_qa_premise
 
 
 app = typer.Typer(add_completion=False)
 console = Console()
 
 
-def _read_jsonl(path: str | Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    p = Path(path)
-    with p.open("rb") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rows.append(orjson.loads(line))
-    return rows
-
-
-def _write_jsonl(path: str | Path, rows: Sequence[Dict[str, Any]]) -> None:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("wb") as f:
-        for row in rows:
-            f.write(orjson.dumps(row))
-            f.write(b"\n")
-
-
-def _write_json(path: str | Path, payload: Dict[str, Any]) -> None:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def _safe_rate(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return float(numerator / denominator)
-
-
-def _require_non_empty_str(row: Dict[str, Any], field: str, row_index: int) -> str:
-    if field not in row:
-        raise ValueError(f"Row {row_index} is missing required field: {field}")
-    value = str(row.get(field) or "").strip()
-    if not value:
-        raise ValueError(f"Row {row_index} has empty required field: {field}")
-    return value
 
 
 def _score_supported(
@@ -104,7 +67,7 @@ def run(
 ) -> None:
     """Verify NLI support for chosen/rejected and report deviation from field-implied labels."""
 
-    rows = _read_jsonl(in_path)
+    rows = read_jsonl_list(in_path)
     if not rows:
         raise typer.BadParameter("Input JSONL has no rows.")
 
@@ -126,9 +89,9 @@ def run(
 
     for idx, row in enumerate(rows, start=1):
         try:
-            knowledge = _require_non_empty_str(row, knowledge_field, idx)
-            question = _require_non_empty_str(row, question_field, idx)
-            chosen = _require_non_empty_str(row, chosen_field, idx)
+            knowledge = require_non_empty_str(row, knowledge_field, row_index=idx)
+            question = require_non_empty_str(row, question_field, row_index=idx)
+            chosen = require_non_empty_str(row, chosen_field, row_index=idx)
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
 
@@ -140,7 +103,7 @@ def run(
         if rejected_field not in row:
             continue
 
-        rejected = str(row.get(rejected_field) or "").strip()
+        rejected = optional_str(row, rejected_field)
         if not rejected:
             if skip_empty_rejected:
                 continue
@@ -234,9 +197,9 @@ def run(
     }
 
     if out:
-        _write_jsonl(out, annotated_rows)
+        write_jsonl(out, annotated_rows)
     if metrics_out:
-        _write_json(metrics_out, summary)
+        write_json(metrics_out, summary)
 
     if out:
         console.print(f"Saved annotated rows to {out}")

@@ -7,9 +7,9 @@ from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
+from dataio import pick_first_non_empty_str, read_jsonl
 from .config import HaluEvalSourceConfig, SourceLengthConfig
-from .io import read_jsonl
-from .prompt import build_generation_prompt
+from prompt import build_qa_answer_prefix
 
 
 @dataclass(frozen=True)
@@ -81,18 +81,15 @@ def iter_jsonl_source(
 
     for i, row in enumerate(rows):
         rid = str(row.get(id_field) or f"jsonl:{i}")
-        knowledge = str(row.get(knowledge_field) or row.get("knowledge") or "").strip()
-        question = str(row.get(question_field) or row.get("question") or "").strip()
+        knowledge = pick_first_non_empty_str(row, [knowledge_field, "knowledge"])
+        question = pick_first_non_empty_str(row, [question_field, "question"])
 
         reference_answer: Optional[str] = None
         if include_reference_answer:
-            reference_answer = str(
-                row.get(answer_field)
-                or row.get("reference_answer")
-                or row.get("right_answer")
-                or row.get("answer")
-                or ""
-            ).strip()
+            reference_answer = pick_first_non_empty_str(
+                row,
+                [answer_field, "reference_answer", "right_answer", "answer"],
+            )
 
         if not knowledge or not question:
             continue
@@ -120,7 +117,7 @@ def filter_source_by_length(
     num_total = 0
 
     for rec in records:
-        prompt = build_generation_prompt(rec.knowledge, rec.question)
+        prompt = build_qa_answer_prefix(rec.knowledge, rec.question)
         p_len = _token_len(tok, prompt)
 
         a_len = 0

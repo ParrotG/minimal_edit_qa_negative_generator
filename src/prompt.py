@@ -2,25 +2,35 @@ from __future__ import annotations
 
 from typing import Optional
 
-from nli_judge.prompt import build_qa_premise as _build_nli_qa_premise
-
 
 def build_qa_premise(knowledge: str, question: str) -> str:
-    """Build the canonical QA premise used by NLI verification and DPO prompt."""
+    """Build canonical QA premise text for NLI-style checks."""
 
-    return _build_nli_qa_premise(knowledge=knowledge, question=question)
+    knowledge_text = str(knowledge or "").strip()
+    question_text = str(question or "").strip()
+    if knowledge_text:
+        return f"{knowledge_text}\nQuestion: {question_text}"
+    return f"Question: {question_text}"
 
 
 def build_qa_answer_prefix(knowledge: str, question: str) -> str:
-    """Build the canonical answer-generation prefix."""
+    """Build canonical QA answer-generation prefix."""
 
-    return f"{build_qa_premise(knowledge, question)}\nAnswer: "
+    return build_qa_answer_prefix_from_premise(build_qa_premise(knowledge=knowledge, question=question))
 
 
-def build_generation_prompt(knowledge: str, question: str) -> str:
-    """Build the prompt used for self-sampling answers."""
+def build_qa_answer_prefix_from_premise(premise: str) -> str:
+    """Build canonical answer prefix from an existing QA premise string."""
 
-    return build_qa_answer_prefix(knowledge, question)
+    return f"{str(premise or '').strip()}\nAnswer: "
+
+
+def build_qa_question_answer_text(question: str, answer: str) -> str:
+    """Build canonical question-answer text for semantic consistency checks."""
+
+    question_text = str(question or "").strip()
+    answer_text = str(answer or "").strip()
+    return f"Question: {question_text}\nAnswer: {answer_text}"
 
 
 def build_repair_prompt(
@@ -29,7 +39,7 @@ def build_repair_prompt(
     rejected_answer: str,
     reference_answer: Optional[str] = None,
 ) -> str:
-    """Build a minimal-edit repair prompt for hard samples."""
+    """Build a minimal-edit repair prompt for hard-sample correction."""
 
     ref_block = ""
     if reference_answer:

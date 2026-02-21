@@ -5,10 +5,10 @@ from typing import Any, Dict, Iterable, Optional
 
 from transformers import AutoTokenizer
 
+from dataio import write_jsonl
 from .halu import QASample
-from .io import write_jsonl
 from .nli import NLIVerifier
-from .prompt import build_qa_premise
+from prompt import build_qa_premise
 
 
 def token_len(tokenizer, text: str) -> int:

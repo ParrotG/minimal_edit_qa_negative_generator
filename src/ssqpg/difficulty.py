@@ -7,7 +7,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import DifficultyConfig
-from .prompt import build_qa_answer_prefix
+from prompt import build_qa_answer_prefix
 
 
 @dataclass(frozen=True)

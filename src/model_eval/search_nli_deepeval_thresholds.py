@@ -5,15 +5,16 @@ import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
-    from nli_judge.prompt import build_qa_premise
     from nli_judge.config import NLIConfig
     from nli_judge.nli import NLIVerifier
+    from prompt import build_qa_premise
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
-    from nli_judge.prompt import build_qa_premise
     from nli_judge.config import NLIConfig
     from nli_judge.nli import NLIVerifier
+    from prompt import build_qa_premise
 
-from .common import group_rows_by_model, write_csv, write_jsonl
+from dataio import write_jsonl
+from .common import group_rows_by_model, write_csv
 from .eval_nli_deepeval_consistency import _binary_stats, _load_deepeval_rows, _mean
 
 

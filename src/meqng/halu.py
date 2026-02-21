@@ -7,11 +7,11 @@ from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 from datasets import load_dataset
 from tqdm import tqdm
 
+from dataio import write_json
 from .config import HaluEvalConfig
 from .nli import NLIVerifier
 from .ner import NERTagger, build_entity_bank
-from .io import write_json
-from .prompt import build_qa_premise
+from prompt import build_qa_premise
 
 
 @dataclass(frozen=True)

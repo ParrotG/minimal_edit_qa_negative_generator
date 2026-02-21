@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import csv
-import json
 import os
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+
+from dataio import optional_str, pick_first_non_empty_str
 
 
 def normalize_list(value: Any) -> List[str]:
@@ -52,6 +53,8 @@ def _extract_question_from_prompt(prompt: str) -> str:
     text = (prompt or "").strip()
     if not text:
         return ""
+    if text.startswith("Question:"):
+        return text.split("Question:", 1)[1].strip()
     if "\nQuestion:" in text:
         _, right = text.rsplit("\nQuestion:", 1)
         return right.strip()
@@ -59,7 +62,7 @@ def _extract_question_from_prompt(prompt: str) -> str:
 
 
 def _extract_knowledge(row: Dict[str, Any]) -> str:
-    knowledge = (row.get("knowledge") or "").strip()
+    knowledge = optional_str(row, "knowledge")
     if knowledge:
         return knowledge
 
@@ -73,28 +76,25 @@ def _extract_knowledge(row: Dict[str, Any]) -> str:
 def extract_generation_item(row: Dict[str, Any], idx: int) -> Optional[Dict[str, Any]]:
     """Extract one normalized QA item from a row."""
 
-    question = (row.get("question") or row.get("eval_question") or row.get("input") or "").strip()
+    question = pick_first_non_empty_str(row, ["question", "eval_question", "input"])
     if not question:
-        question = _extract_question_from_prompt((row.get("prompt") or "").strip())
+        question = _extract_question_from_prompt(optional_str(row, "prompt"))
 
     knowledge = _extract_knowledge(row)
     if not question or not knowledge:
         return None
 
     source_id = str(row.get("source_id") or row.get("id") or idx)
-    reference_answer = (
-        row.get("reference_answer")
-        or row.get("chosen")
-        or row.get("reference")
-        or row.get("right_answer")
-        or ""
+    reference_answer = pick_first_non_empty_str(
+        row,
+        ["reference_answer", "chosen", "reference", "right_answer"],
     )
     return {
         "sample_id": idx,
         "source_id": source_id,
         "question": question,
         "knowledge": knowledge,
-        "reference_answer": str(reference_answer).strip(),
+        "reference_answer": reference_answer,
     }
 
 
@@ -147,13 +147,13 @@ def to_chat_prompt(tokenizer: Any, prompt: str, enable_thinking: bool) -> str:
 def normalize_generated_row(row: Dict[str, Any], idx: int) -> Optional[Dict[str, Any]]:
     """Normalize one generated-answer row for downstream evaluators."""
 
-    answer = (row.get("answer") or row.get("actual_output") or "").strip()
+    answer = pick_first_non_empty_str(row, ["answer", "actual_output"])
     if not answer:
         return None
 
-    question = (row.get("question") or row.get("eval_question") or row.get("input") or "").strip()
+    question = pick_first_non_empty_str(row, ["question", "eval_question", "input"])
     if not question:
-        question = _extract_question_from_prompt((row.get("prompt") or "").strip())
+        question = _extract_question_from_prompt(optional_str(row, "prompt"))
 
     knowledge = _extract_knowledge(row)
     if not question or not knowledge:
@@ -165,7 +165,7 @@ def normalize_generated_row(row: Dict[str, Any], idx: int) -> Optional[Dict[str,
 
     sample_id = safe_int(row.get("sample_id"), idx)
     source_id = str(row.get("source_id") or row.get("id") or sample_id)
-    reference_answer = str(row.get("reference_answer") or row.get("chosen") or "").strip()
+    reference_answer = pick_first_non_empty_str(row, ["reference_answer", "chosen"])
 
     return {
         "model_tag": model_tag,
@@ -212,15 +212,6 @@ def group_rows_by_model(rows: Sequence[Dict[str, Any]]) -> Dict[Tuple[str, int, 
     return grouped
 
 
-def write_jsonl(rows: Iterable[Dict[str, Any]], path: str) -> None:
-    """Write rows to JSONL."""
-
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
 def write_csv(rows: Sequence[Dict[str, Any]], path: str) -> None:
     """Write rows to CSV with a stable discovered header order."""
 
@@ -235,4 +226,3 @@ def write_csv(rows: Sequence[Dict[str, Any]], path: str) -> None:
         writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()
         writer.writerows(rows)
-

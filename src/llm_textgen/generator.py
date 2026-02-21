@@ -8,6 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import UnifiedLLMConfig
+from prompt import build_qa_answer_prefix
 
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.IGNORECASE | re.DOTALL)
@@ -156,13 +157,10 @@ class UnifiedTextGenerator:
     def _build_qa_prompt(knowledge: str, question: str) -> str:
         """Build a QA-style prompt from knowledge and question fields."""
 
-        knowledge_text = str(knowledge or "").strip()
         question_text = str(question or "").strip()
         if not question_text:
             raise ValueError("question must not be empty.")
-        if knowledge_text:
-            return f"Knowledge:\n{knowledge_text}\n\nQuestion: {question_text}\nAnswer:"
-        return f"Question: {question_text}\nAnswer:"
+        return build_qa_answer_prefix(knowledge=knowledge, question=question_text)
 
     def _generate_batch(
         self,

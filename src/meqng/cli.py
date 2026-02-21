@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
 from rich.progress import track
 
+from dataio import read_json, read_jsonl, write_jsonl
+from prompt import build_qa_answer_prefix, build_qa_answer_prefix_from_premise, build_qa_premise
 from .config import DifficultyConfig, FilterConfig, HaluEvalConfig, NLIConfig, SpanDropConfig, TextAttackConfig
 from .difficulty import DifficultyScorer
 from .halu import build_entity_bank_from_halueval, iter_halueval_qa, sanity_check_nli
-from .io import read_jsonl, write_jsonl
 from .nli import NLIVerifier
-from .prompt import build_qa_answer_prefix, build_qa_premise
 from .ranking import compute_rank_score
 from .sampling import sample_halueval
 from .perturb import build_perturbators
@@ -188,7 +187,7 @@ def perturb_generate(
     """Stage 3: Generate candidate negatives by applying multiple perturbators."""
     bank_obj: Optional[Dict[str, Any]] = None
     if entity_bank:
-        bank_obj = json.loads(Path(entity_bank).read_text(encoding="utf-8"))
+        bank_obj = read_json(entity_bank)
 
     semantic_model_name = textattack_semantic_model_name or None
     textattack_verifier: Optional[NLIVerifier] = None
@@ -316,7 +315,7 @@ def perturb_one(
     """Standalone: run a single perturbator on one sample and print candidates."""
     bank_obj: Optional[Dict[str, Any]] = None
     if entity_bank:
-        bank_obj = json.loads(Path(entity_bank).read_text(encoding="utf-8"))
+        bank_obj = read_json(entity_bank)
 
     semantic_model_name = textattack_semantic_model_name or None
     textattack_verifier: Optional[NLIVerifier] = None
@@ -542,7 +541,7 @@ def filter_bucket(
         if "knowledge" in r and "question" in r:
             prompt_prefixes.append(build_qa_answer_prefix(r["knowledge"], r["question"]))
         else:
-            prompt_prefixes.append(f"{r['prompt']}\nAnswer: ")
+            prompt_prefixes.append(build_qa_answer_prefix_from_premise(r["prompt"]))
         chosens.append(r["chosen"])
         rejecteds.append(r["rejected"])
 

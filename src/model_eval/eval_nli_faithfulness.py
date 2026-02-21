@@ -12,7 +12,8 @@ except ImportError:  # pragma: no cover - compatibility fallback for editable in
     from nli_judge.judge import AnswerJudge
     from nli_judge.nli import NLIVerifier
 
-from .common import group_rows_by_model, load_generated_rows, write_csv, write_jsonl
+from dataio import write_jsonl
+from .common import group_rows_by_model, load_generated_rows, write_csv
 
 
 def parse_args() -> argparse.Namespace:

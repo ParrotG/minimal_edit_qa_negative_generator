@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from sentence_transformers import SentenceTransformer, util
 
+from prompt import build_qa_question_answer_text
 from .base import FilterDecision
 
 
@@ -19,8 +20,8 @@ class QAConsistencyFilter:
         self.model = SentenceTransformer(self.model_name)
 
     def check(self, knowledge: str, question: str, chosen: str, candidate: str) -> FilterDecision:
-        ref = f"Question: {question}\nAnswer: {chosen}"
-        cand = f"Question: {question}\nAnswer: {candidate}"
+        ref = build_qa_question_answer_text(question=question, answer=chosen)
+        cand = build_qa_question_answer_text(question=question, answer=candidate)
         embs = self.model.encode([ref, cand], convert_to_tensor=True, normalize_embeddings=True)
         sim = float(util.cos_sim(embs[0], embs[1]).item())
         keep = sim >= self.min_similarity

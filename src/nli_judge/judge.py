@@ -6,7 +6,7 @@ from sentence_transformers import SentenceTransformer, util
 
 from .config import JudgeConfig
 from .nli import NLIScores, NLIVerifier
-from .prompt import build_qa_premise
+from prompt import build_qa_premise, build_qa_question_answer_text
 
 
 class AnswerJudge:
@@ -44,8 +44,8 @@ class AnswerJudge:
             if not reference:
                 continue
             valid_indices.append(i)
-            refs.append(f"Question: {row['question']}\nAnswer: {reference}")
-            cands.append(f"Question: {row['question']}\nAnswer: {row['answer']}")
+            refs.append(build_qa_question_answer_text(question=row["question"], answer=reference))
+            cands.append(build_qa_question_answer_text(question=row["question"], answer=row["answer"]))
 
         out: List[Optional[float]] = [None] * len(rows)
         if not valid_indices:

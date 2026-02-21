@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import typer
 from rich.console import Console
 
+from dataio import read_jsonl, write_json, write_jsonl
 from .audit import surface_signal_audit
 from .answer_filter import apply_answer_filters
 from .config import (
@@ -26,7 +27,6 @@ from .difficulty import assign_difficulty_buckets
 from .filtering import apply_pair_filters
 from .generation import ApiSelfSampler, SelfSampler
 from .hard_augment import repair_hard_with_api, resample_hard_answers
-from .io import read_jsonl, write_json, write_jsonl
 from nli_judge.config import JudgeConfig, NLIConfig
 from nli_judge.judge import AnswerJudge
 from nli_judge.nli import NLIVerifier

@@ -20,8 +20,8 @@ class JudgeConfig:
     """Judgment thresholds and optional semantic consistency constraints."""
 
     reference_entail_threshold: float = 0.60
-    candidate_entail_threshold: float = 0.45
-    candidate_contradict_threshold: float = 0.90
+    candidate_entail_threshold: float = 0.86
+    candidate_contradict_threshold: float = 0.07
     vote_mode: str = "primary"  # primary | and | or
     qa_similarity_model_name: Optional[str] = "sentence-transformers/all-MiniLM-L6-v2"
     qa_similarity_min: float = 0.65

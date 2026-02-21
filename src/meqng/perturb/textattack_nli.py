@@ -10,7 +10,7 @@ from sentence_transformers import SentenceTransformer, util
 
 from ..ner import NERTagger, extract_numbers
 from ..nli import NLIVerifier
-from ..prompt import build_qa_premise
+from prompt import build_qa_premise
 from .base import PerturbCandidate
 
 

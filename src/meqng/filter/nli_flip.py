@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 from .base import FilterDecision
 from ..nli import NLIVerifier
-from ..prompt import build_qa_premise
+from prompt import build_qa_premise
 
 
 @dataclass

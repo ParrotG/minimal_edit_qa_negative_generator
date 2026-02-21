@@ -10,7 +10,8 @@ try:
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
     from llm_textgen import GeneratorModelSpec, build_generator_model_specs, load_generator_from_spec
 
-from .common import load_generation_items, write_jsonl
+from dataio import write_jsonl
+from .common import load_generation_items
 
 
 def parse_args() -> argparse.Namespace:

@@ -8,7 +8,8 @@ from deepeval.evaluate.configs import AsyncConfig, DisplayConfig
 from deepeval.metrics import HallucinationMetric
 from deepeval.test_case import LLMTestCase
 
-from .common import load_generated_rows, write_csv, write_jsonl
+from dataio import write_jsonl
+from .common import load_generated_rows, write_csv
 
 
 def parse_args() -> argparse.Namespace:

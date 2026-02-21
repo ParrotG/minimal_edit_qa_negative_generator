@@ -12,7 +12,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import GenerationConfig
-from .prompt import build_generation_prompt
+from prompt import build_qa_answer_prefix
 from .text import normalize_whitespace
 
 
@@ -169,7 +169,7 @@ class SelfSampler:
         self.model.eval()
 
     def _build_prompt(self, knowledge: str, question: str) -> str:
-        plain_prompt = build_generation_prompt(knowledge, question)
+        plain_prompt = build_qa_answer_prefix(knowledge, question)
         if not self.cfg.use_chat_template:
             return plain_prompt
         return _build_chat_prompt(self.tokenizer, plain_prompt=plain_prompt, enable_thinking=self.cfg.enable_thinking)
@@ -409,7 +409,7 @@ class ApiSelfSampler:
         return int(len(answer.split()))
 
     async def _generate_one(self, client: httpx.AsyncClient, job: Dict[str, Any]) -> Dict[str, Any]:
-        prompt = build_generation_prompt(job["knowledge"], job["question"])
+        prompt = build_qa_answer_prefix(job["knowledge"], job["question"])
         seed = self._job_seed(job)
         data = await self._post_with_retry(client=client, prompt=prompt, seed=seed)
 

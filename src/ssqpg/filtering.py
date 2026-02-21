@@ -8,8 +8,8 @@ from sentence_transformers import SentenceTransformer, util
 from .config import PairFilterConfig
 from .ner import NERTagger, extract_numbers
 from nli_judge.nli import NLIVerifier
+from prompt import build_qa_premise, build_qa_question_answer_text
 from .text import length_ratio, normalized_edit_distance
-from .prompt import build_qa_premise
 
 
 _YEAR_RE = re.compile(r"\b\d{4}\b")
@@ -171,8 +171,8 @@ def apply_pair_filters(
         }
 
         if qa_model is not None:
-            ref = f"Question: {row['question']}\nAnswer: {chosen}"
-            cand = f"Question: {row['question']}\nAnswer: {rejected}"
+            ref = build_qa_question_answer_text(question=row["question"], answer=chosen)
+            cand = build_qa_question_answer_text(question=row["question"], answer=rejected)
             embs = qa_model.encode([ref, cand], convert_to_tensor=True, normalize_embeddings=True)
             sim = float(util.cos_sim(embs[0], embs[1]).item())
             keep_qa = sim >= cfg.qa_similarity_min
