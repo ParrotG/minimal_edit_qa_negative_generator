@@ -1,4 +1,5 @@
 data/
+ckpt/
 outputs/
 .venv/
 .vscode/
