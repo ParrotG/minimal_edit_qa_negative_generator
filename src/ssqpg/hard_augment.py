@@ -11,15 +11,15 @@ import httpx
 from .answer_filter import apply_answer_filters
 from .config import AnswerFilterConfig, GenerationConfig, HardAugmentConfig
 from .generation import ApiSelfSampler, SelfSampler
-from nli_judge.judge import AnswerJudge
-from .pairing import summarize_question_groups
+from .grouping import summarize_question_groups
+from qa_judge.judge import AnswerJudge
 from prompt import build_repair_prompt
 from .text import normalize_whitespace
 
 
 def _support_score(row: Dict[str, Any]) -> float:
     judge = row.get("judge") or {}
-    return float(judge.get("candidate_entail_primary", 0.0))
+    return float(judge.get("margin", 0.0))
 
 
 def _hard_question_views(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:

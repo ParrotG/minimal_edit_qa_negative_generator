@@ -19,7 +19,7 @@ uv sync
 python -m spacy download en_core_web_trf
 ```
 
-### 3) Optional extras (install only when needed)
+### 3) Optional extras
 
 ```bash
 # LoRA adapter loading in llm_textgen
@@ -39,7 +39,7 @@ The project is stage-driven. Run each stage explicitly and keep intermediate JSO
 ### Stage 1: Source sampling
 
 ```bash
-ssqpg source sample \
+python -m src.ssqpg.cli source sample \
   --out data/processed/source.jsonl \
   --source halueval \
   --max-samples 5000 \
@@ -49,7 +49,7 @@ ssqpg source sample \
 ### Stage 2: Self-sampled answer generation
 
 ```bash
-ssqpg generate answers \
+python -m src.ssqpg.cli generate answers \
   --in-path data/processed/source.jsonl \
   --out data/processed/generated.jsonl \
   --backend local \
@@ -57,57 +57,73 @@ ssqpg generate answers \
   --num-samples-per-question 6
 ```
 
-### Stage 3: NLI-based answer judgment
+### Stage 3: Calibrated answer judgment (Method B + Method D)
 
 ```bash
-ssqpg judge answers \
+python -m src.ssqpg.cli judge answers \
   --in-path data/processed/generated.jsonl \
   --out data/processed/judged.jsonl
 ```
 
-### Stage 4: Pair building with hard-question augmentation
+### Stage 4: Answer filter (drop abstain by default)
 
 ```bash
-ssqpg pair build \
+python -m src.ssqpg.cli pair answer-filter \
   --in-path data/processed/judged.jsonl \
-  --out data/processed/pairs.jsonl \
-  --out-augmented-judged data/processed/judged_augmented.jsonl \
+  --out data/processed/judged_filtered.jsonl
+```
+
+### Stage 5: Group summary (inspection step)
+
+```bash
+python -m src.ssqpg.cli pair group \
+  --in-path data/processed/judged_filtered.jsonl \
+  --out data/processed/grouped.jsonl
+```
+
+### Stage 6: Hard augmentation (rejudge + re-filter)
+
+```bash
+python -m src.ssqpg.cli pair hard-augment \
+  --in-path data/processed/judged_filtered.jsonl \
+  --out data/processed/judged_augmented.jsonl \
   --extra-samples-per-hard 0 \
   --enable-api-repair true
 ```
 
-### Stage 5: Final pair filtering (DPO-ready)
+### Stage 7: Pairing
 
 ```bash
-ssqpg filter apply \
+python -m src.ssqpg.cli pair pairing \
+  --in-path data/processed/judged_augmented.jsonl \
+  --out data/processed/pairs.jsonl
+```
+
+### Stage 8: Final pair filtering (no NLI re-run)
+
+```bash
+python -m src.ssqpg.cli filter apply \
   --in-path data/processed/pairs.jsonl \
   --out data/processed/dpo_pairs.jsonl
 ```
 
-### Stage 6: Surface-signal audit
+### Stage 9: Surface-signal audit
 
 ```bash
-ssqpg audit surface \
+python -m src.ssqpg.cli audit surface \
   --in-path data/processed/dpo_pairs.jsonl \
   --out data/metrics/surface_audit.json
 ```
 
-### Stage 7: Difficulty bucketing
+### Stage 10: Difficulty bucketing
 
 ```bash
-ssqpg bucket difficulty \
+python -m src.ssqpg.cli bucket difficulty \
   --in-path data/processed/dpo_pairs.jsonl \
   --out data/processed/dpo_pairs_bucketed.jsonl
 ```
 
 ## Evaluation Utilities (`model_eval`)
-
-`model_eval` scripts are decoupled tools for:
-- answer generation across base/LoRA checkpoints
-- NLI faithfulness evaluation
-- DeepEval hallucination scoring
-- NLI/DeepEval consistency analysis
-- threshold search and pairwise preference curves
 
 Run them from source, for example:
 
@@ -119,6 +135,6 @@ python -m src.model_eval.eval_deepeval_hallucination --help
 
 ## Notes on Naming
 
-- Package name remains `meqng` to avoid environment breakage.
-- Current active implementation is `ssqpg`.
+- Active judge package: `qa_judge`.
+- Active data pipeline: `ssqpg`.
 - Legacy `meqng` code is preserved but not the primary research route.

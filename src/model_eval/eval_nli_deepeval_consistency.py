@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import argparse
 import math
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 try:
-    from nli_judge.config import JudgeConfig, NLIConfig
-    from nli_judge.judge import AnswerJudge
-    from nli_judge.nli import NLIVerifier
+    from qa_judge.config import JudgeConfig, NLIConfig
+    from qa_judge.judge import AnswerJudge
+    from qa_judge.nli import NLIVerifier
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
-    from nli_judge.config import JudgeConfig, NLIConfig
-    from nli_judge.judge import AnswerJudge
-    from nli_judge.nli import NLIVerifier
+    from qa_judge.config import JudgeConfig, NLIConfig
+    from qa_judge.judge import AnswerJudge
+    from qa_judge.nli import NLIVerifier
 
 from dataio import write_jsonl
 from .common import group_rows_by_model, load_dataset_split, normalize_list, safe_int, write_csv
@@ -20,7 +20,6 @@ from .common import group_rows_by_model, load_dataset_split, normalize_list, saf
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
-    # Input: DeepEval details artifact.
     parser.add_argument(
         "--deepeval_details_path",
         type=str,
@@ -37,7 +36,6 @@ def parse_args() -> argparse.Namespace:
         help="Skip rows where DeepEval reported non-empty error.",
     )
 
-    # Label semantics alignment.
     parser.add_argument(
         "--deepeval_success_means_supported",
         action=argparse.BooleanOptionalAction,
@@ -45,9 +43,7 @@ def parse_args() -> argparse.Namespace:
         help="If True, DeepEval success=True is treated as faithful/supported.",
     )
 
-    # NLI judgment settings.
     parser.add_argument("--nli_model_name", type=str, default=NLIConfig.model_name)
-    parser.add_argument("--secondary_nli_model_name", type=str, default=None)
     parser.add_argument("--nli_device", type=str, default=NLIConfig.device)
     parser.add_argument("--nli_batch_size", type=int, default=NLIConfig.batch_size)
     parser.add_argument("--nli_max_length", type=int, default=NLIConfig.max_length)
@@ -57,11 +53,14 @@ def parse_args() -> argparse.Namespace:
         default=NLIConfig.fp16,
         help="Whether to enable fp16 for NLI scoring on CUDA.",
     )
-    parser.add_argument("--candidate_entail_threshold", type=float, default=JudgeConfig.candidate_entail_threshold)
-    parser.add_argument("--candidate_contradict_threshold", type=float, default=JudgeConfig.candidate_contradict_threshold)
-    parser.add_argument("--vote_mode", type=str, default=JudgeConfig.vote_mode, choices=["primary", "and", "or"])
+    parser.add_argument("--temperature", type=float, default=JudgeConfig.temperature)
+    parser.add_argument("--full_margin_threshold", type=float, default=JudgeConfig.full_margin_threshold)
+    parser.add_argument("--reject_margin_threshold", type=float, default=JudgeConfig.reject_margin_threshold)
+    parser.add_argument("--reject_band_half_width", type=float, default=JudgeConfig.reject_band_half_width)
+    parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_fail_as_negative)
+    parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_check_answer_type)
+    parser.add_argument("--qa_spacy_model", type=str, default=JudgeConfig.qa_spacy_model)
 
-    # Outputs.
     parser.add_argument("--out_csv", type=str, default="nli_deepeval_consistency.csv")
     parser.add_argument("--out_jsonl", type=str, default="nli_deepeval_consistency_samples.jsonl")
     return parser.parse_args()
@@ -132,7 +131,7 @@ def _load_deepeval_rows(args: argparse.Namespace) -> List[Dict[str, Any]]:
 
 
 def _build_answer_judge(args: argparse.Namespace) -> AnswerJudge:
-    primary = NLIVerifier(
+    verifier = NLIVerifier(
         model_name=args.nli_model_name,
         device=args.nli_device,
         batch_size=args.nli_batch_size,
@@ -140,25 +139,16 @@ def _build_answer_judge(args: argparse.Namespace) -> AnswerJudge:
         fp16=args.nli_fp16,
     )
 
-    secondary = None
-    if args.secondary_nli_model_name:
-        secondary = NLIVerifier(
-            model_name=args.secondary_nli_model_name,
-            device=args.nli_device,
-            batch_size=args.nli_batch_size,
-            max_length=args.nli_max_length,
-            fp16=args.nli_fp16,
-        )
-
     cfg = JudgeConfig(
-        reference_entail_threshold=JudgeConfig.reference_entail_threshold,
-        candidate_entail_threshold=args.candidate_entail_threshold,
-        candidate_contradict_threshold=args.candidate_contradict_threshold,
-        vote_mode=args.vote_mode,
-        qa_similarity_model_name=None,
-        qa_similarity_min=JudgeConfig.qa_similarity_min,
+        temperature=args.temperature,
+        full_margin_threshold=args.full_margin_threshold,
+        reject_margin_threshold=args.reject_margin_threshold,
+        reject_band_half_width=args.reject_band_half_width,
+        qa_fail_as_negative=bool(args.qa_fail_as_negative),
+        qa_check_answer_type=bool(args.qa_check_answer_type),
+        qa_spacy_model=args.qa_spacy_model,
     )
-    return AnswerJudge(cfg=cfg, primary_verifier=primary, secondary_verifier=secondary)
+    return AnswerJudge(cfg=cfg, verifier=verifier)
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -235,7 +225,7 @@ def _rankdata(values: Sequence[float]) -> List[float]:
         j = i
         while j + 1 < len(indexed) and indexed[j + 1][1] == indexed[i][1]:
             j += 1
-        avg_rank = (i + j + 2) / 2.0  # one-based average rank
+        avg_rank = (i + j + 2) / 2.0
         for k in range(i, j + 1):
             ranks[indexed[k][0]] = avg_rank
         i = j + 1
@@ -253,7 +243,6 @@ def _attach_nli(rows: List[Dict[str, Any]], judge: AnswerJudge) -> List[Dict[str
         {
             "knowledge": row["knowledge"],
             "question": row["question"],
-            "reference_answer": "",
             "answer": row["answer"],
         }
         for row in rows
@@ -263,7 +252,8 @@ def _attach_nli(rows: List[Dict[str, Any]], judge: AnswerJudge) -> List[Dict[str
     out: List[Dict[str, Any]] = []
     for base, judged in zip(rows, judged_rows):
         judge_payload = judged.get("judge", {})
-        nli_supported = bool(judge_payload.get("candidate_supported", False))
+        full_decision = (judge_payload.get("full_binary") or {}).get("decision")
+        nli_supported = bool(full_decision == "yes")
         deepeval_success = base.get("deepeval_success")
 
         out.append(
@@ -271,9 +261,8 @@ def _attach_nli(rows: List[Dict[str, Any]], judge: AnswerJudge) -> List[Dict[str
                 **base,
                 "nli_supported": nli_supported,
                 "nli_is_correct": bool(judge_payload.get("is_correct", False)),
-                "nli_candidate_entail": _safe_float(judge_payload.get("candidate_entail_primary")),
-                "nli_candidate_contradict": _safe_float(judge_payload.get("candidate_contradict_primary")),
-                "nli_vote_mode": judge_payload.get("vote_mode"),
+                "nli_margin": _safe_float(judge_payload.get("margin")),
+                "nli_reject_decision": (judge_payload.get("reject_aware") or {}).get("decision"),
                 "is_comparable": deepeval_success is not None,
                 "label_agree": None if deepeval_success is None else bool(nli_supported == deepeval_success),
             }
@@ -296,16 +285,11 @@ def _summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     scored_rows = [r for r in rows if r.get("deepeval_score") is not None]
     deepeval_scores = [float(r["deepeval_score"]) for r in scored_rows]
-    nli_contradict = [float(r["nli_candidate_contradict"]) for r in scored_rows if r.get("nli_candidate_contradict") is not None]
-    nli_entail = [float(r["nli_candidate_entail"]) for r in scored_rows if r.get("nli_candidate_entail") is not None]
+    nli_margin = [float(r["nli_margin"]) for r in scored_rows if r.get("nli_margin") is not None]
 
-    corr_rows_contra = [r for r in scored_rows if r.get("nli_candidate_contradict") is not None]
-    score_for_contra = [float(r["deepeval_score"]) for r in corr_rows_contra]
-    contra_values = [float(r["nli_candidate_contradict"]) for r in corr_rows_contra]
-
-    corr_rows_entail = [r for r in scored_rows if r.get("nli_candidate_entail") is not None]
-    score_for_entail = [float(r["deepeval_score"]) for r in corr_rows_entail]
-    entail_values = [float(r["nli_candidate_entail"]) for r in corr_rows_entail]
+    corr_rows = [r for r in scored_rows if r.get("nli_margin") is not None]
+    score_values = [float(r["deepeval_score"]) for r in corr_rows]
+    margin_values = [float(r["nli_margin"]) for r in corr_rows]
 
     return {
         "model_tag": tag,
@@ -326,13 +310,10 @@ def _summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "tn": bstats["tn"],
         "fp": bstats["fp"],
         "fn": bstats["fn"],
-        "corr_pearson_score_vs_nli_contradict": _pearson_corr(score_for_contra, contra_values),
-        "corr_spearman_score_vs_nli_contradict": _spearman_corr(score_for_contra, contra_values),
-        "corr_pearson_score_vs_nli_entail": _pearson_corr(score_for_entail, entail_values),
-        "corr_spearman_score_vs_nli_entail": _spearman_corr(score_for_entail, entail_values),
+        "corr_pearson_score_vs_nli_margin": _pearson_corr(score_values, margin_values),
+        "corr_spearman_score_vs_nli_margin": _spearman_corr(score_values, margin_values),
         "deepeval_score_mean": _mean(deepeval_scores),
-        "nli_contradict_mean": _mean(nli_contradict),
-        "nli_entail_mean": _mean(nli_entail),
+        "nli_margin_mean": _mean(nli_margin),
     }
 
 

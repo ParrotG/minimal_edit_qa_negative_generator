@@ -8,8 +8,8 @@ import typer
 from rich.console import Console
 
 from dataio import read_jsonl, write_json, write_jsonl
-from .audit import surface_signal_audit
 from .answer_filter import apply_answer_filters
+from .audit import surface_signal_audit
 from .config import (
     AnswerFilterConfig,
     AuditConfig,
@@ -23,13 +23,14 @@ from .config import (
 )
 from .dataset import filter_source_by_length, iter_halueval_source, iter_jsonl_source, source_to_json
 from .difficulty import assign_difficulty_buckets
-from .filtering import apply_pair_filters
 from .generation import ApiSelfSampler, SelfSampler
+from .grouping import summarize_question_groups
 from .hard_augment import repair_hard_with_api, resample_hard_answers
-from nli_judge.config import JudgeConfig, NLIConfig
-from nli_judge.judge import AnswerJudge
-from nli_judge.nli import NLIVerifier
-from .pairing import build_pairs, summarize_question_groups
+from .pair_filter import apply_pair_filters
+from .pairing import build_pairs
+from qa_judge.config import JudgeConfig, NLIConfig
+from qa_judge.judge import AnswerJudge
+from qa_judge.nli import NLIVerifier
 
 
 app = typer.Typer(add_completion=False)
@@ -290,57 +291,41 @@ def generate_answers(
 def judge_answers(
     in_path: str = typer.Option(..., help="Input generated JSONL path."),
     out: str = typer.Option(..., help="Output judged JSONL path."),
-    primary_nli_model: str = typer.Option(NLIConfig.model_name, help="Primary NLI model name."),
-    secondary_nli_model: Optional[str] = typer.Option(None, help="Optional secondary NLI model name."),
+    nli_model: str = typer.Option(NLIConfig.model_name, help="NLI model name."),
     device: str = typer.Option(NLIConfig.device, help="NLI device."),
     batch_size: int = typer.Option(NLIConfig.batch_size, help="NLI batch size."),
     max_length: int = typer.Option(NLIConfig.max_length, help="NLI max length."),
     fp16: bool = typer.Option(NLIConfig.fp16, help="Whether to enable fp16 for NLI on CUDA."),
-    reference_entail_threshold: float = typer.Option(JudgeConfig.reference_entail_threshold, help="Reference entail threshold."),
-    candidate_entail_threshold: float = typer.Option(JudgeConfig.candidate_entail_threshold, help="Candidate entail threshold."),
-    candidate_contradict_threshold: float = typer.Option(
-        JudgeConfig.candidate_contradict_threshold,
-        help="Candidate contradiction upper threshold.",
-    ),
-    vote_mode: str = typer.Option(JudgeConfig.vote_mode, help="primary | and | or"),
-    qa_similarity_model_name: Optional[str] = typer.Option(
-        JudgeConfig.qa_similarity_model_name,
-        help="Sentence-Transformer model for QA consistency. Use empty string to disable.",
-    ),
-    qa_similarity_min: float = typer.Option(JudgeConfig.qa_similarity_min, help="QA similarity threshold."),
+    temperature: float = typer.Option(JudgeConfig.temperature, help="Temperature scaling parameter."),
+    full_margin_threshold: float = typer.Option(JudgeConfig.full_margin_threshold, help="Method-B margin threshold."),
+    reject_margin_threshold: float = typer.Option(JudgeConfig.reject_margin_threshold, help="Method-D margin threshold."),
+    reject_band_half_width: float = typer.Option(JudgeConfig.reject_band_half_width, help="Method-D reject band half-width."),
+    qa_fail_as_negative: bool = typer.Option(JudgeConfig.qa_fail_as_negative, help="Whether QA inconsistency forces negative label."),
+    qa_check_answer_type: bool = typer.Option(JudgeConfig.qa_check_answer_type, help="Enable single-answer QA type check."),
+    qa_spacy_model: str = typer.Option(JudgeConfig.qa_spacy_model, help="spaCy model used by QA type checks."),
     metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
 ) -> None:
-    """Stage 3: judge sampled answers with NLI support and QA consistency."""
+    """Stage 3: judge sampled answers with calibrated NLI (B/D) and optional QA checks."""
 
     rows = list(read_jsonl(in_path))
-    primary = NLIVerifier(
-        model_name=primary_nli_model,
+    verifier = NLIVerifier(
+        model_name=nli_model,
         device=device,
         batch_size=batch_size,
         max_length=max_length,
         fp16=fp16,
     )
 
-    secondary = None
-    if secondary_nli_model:
-        secondary = NLIVerifier(
-            model_name=secondary_nli_model,
-            device=device,
-            batch_size=batch_size,
-            max_length=max_length,
-            fp16=fp16,
-        )
-
-    qa_model_name = qa_similarity_model_name or None
     cfg = JudgeConfig(
-        reference_entail_threshold=reference_entail_threshold,
-        candidate_entail_threshold=candidate_entail_threshold,
-        candidate_contradict_threshold=candidate_contradict_threshold,
-        vote_mode=vote_mode,
-        qa_similarity_model_name=qa_model_name,
-        qa_similarity_min=qa_similarity_min,
+        temperature=temperature,
+        full_margin_threshold=full_margin_threshold,
+        reject_margin_threshold=reject_margin_threshold,
+        reject_band_half_width=reject_band_half_width,
+        qa_fail_as_negative=qa_fail_as_negative,
+        qa_check_answer_type=qa_check_answer_type,
+        qa_spacy_model=qa_spacy_model,
     )
-    judge = AnswerJudge(cfg=cfg, primary_verifier=primary, secondary_verifier=secondary)
+    judge = AnswerJudge(cfg=cfg, verifier=verifier)
     judged, metrics = judge.judge(rows)
     write_jsonl(out, judged)
 
@@ -351,37 +336,76 @@ def judge_answers(
     console.print_json(json.dumps(metrics))
 
 
-@pair_app.command("build")
-def pair_build(
+@pair_app.command("answer-filter")
+def pair_answer_filter(
     in_path: str = typer.Option(..., help="Input judged JSONL path."),
-    out: str = typer.Option(..., help="Output pair-level JSONL path."),
-    out_filtered_judged: Optional[str] = typer.Option(None, help="Optional output path for answer-filtered judged rows."),
-    out_augmented_judged: Optional[str] = typer.Option(None, help="Optional output path for augmented judged rows."),
+    out: str = typer.Option(..., help="Output answer-filtered judged JSONL path."),
     tokenizer_name: str = typer.Option(AnswerFilterConfig.tokenizer_name, help="Tokenizer name for answer-token filtering."),
     min_answer_tokens: int = typer.Option(AnswerFilterConfig.min_answer_tokens, help="Minimum answer tokens."),
     max_answer_tokens: int = typer.Option(AnswerFilterConfig.max_answer_tokens, help="Maximum answer tokens."),
     max_answer_chars: int = typer.Option(AnswerFilterConfig.max_answer_chars, help="Maximum answer characters."),
-    require_qa_consistent: bool = typer.Option(AnswerFilterConfig.require_qa_consistent, help="Require qa_consistent=true from judged rows."),
-    require_reference_supported: bool = typer.Option(
-        AnswerFilterConfig.require_reference_supported,
-        help="Require reference_supported_primary=true when reference exists.",
-    ),
+    drop_abstain: bool = typer.Option(AnswerFilterConfig.drop_abstain, help="Drop rows with reject decision=abstain."),
     drop_prompt_leak: bool = typer.Option(AnswerFilterConfig.drop_prompt_leak, help="Drop answers with prompt-leak markers."),
     drop_option_style: bool = typer.Option(AnswerFilterConfig.drop_option_style, help="Drop option-style answers."),
-    drop_easy: bool = typer.Option(PairSelectConfig.drop_easy, help="Drop easy questions after grouping."),
-    keep_unresolved_hard: bool = typer.Option(PairSelectConfig.keep_unresolved_hard, help="Keep unresolved hard questions as needs_positive."),
-    hard_negative_entail_weight: float = typer.Option(
-        PairSelectConfig.hard_negative_entail_weight,
-        help="Weight of rejected entailment when selecting hard negatives.",
-    ),
-    hard_negative_edit_proximity_weight: float = typer.Option(
-        PairSelectConfig.hard_negative_edit_proximity_weight,
-        help="Weight of edit proximity when selecting hard negatives.",
-    ),
-    hard_negative_length_proximity_weight: float = typer.Option(
-        PairSelectConfig.hard_negative_length_proximity_weight,
-        help="Weight of length proximity when selecting hard negatives.",
-    ),
+    metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
+) -> None:
+    """Stage 4: run single-answer filtering and remove abstained rows."""
+
+    rows = list(read_jsonl(in_path))
+    answer_cfg = AnswerFilterConfig(
+        tokenizer_name=tokenizer_name,
+        min_answer_tokens=min_answer_tokens,
+        max_answer_tokens=max_answer_tokens,
+        max_answer_chars=max_answer_chars,
+        drop_abstain=drop_abstain,
+        drop_prompt_leak=drop_prompt_leak,
+        drop_option_style=drop_option_style,
+    )
+    filtered_rows, metrics = apply_answer_filters(rows, answer_cfg)
+    write_jsonl(out, filtered_rows)
+
+    if metrics_out:
+        write_json(metrics_out, metrics)
+
+    console.print(f"Saved {len(filtered_rows)} answer-filtered rows to {out}")
+    console.print_json(json.dumps(metrics))
+
+
+@pair_app.command("group")
+def pair_group(
+    in_path: str = typer.Option(..., help="Input answer-filtered judged JSONL path."),
+    out: str = typer.Option(..., help="Output grouped JSONL path."),
+    metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
+) -> None:
+    """Stage 5: summarize per-question groups from filtered judged rows."""
+
+    rows = list(read_jsonl(in_path))
+    groups, group_counts = summarize_question_groups(rows)
+    write_jsonl(out, groups)
+
+    metrics = {
+        "num_input_rows": len(rows),
+        "num_groups": len(groups),
+        "group_counts": group_counts,
+    }
+    if metrics_out:
+        write_json(metrics_out, metrics)
+
+    console.print(f"Saved {len(groups)} grouped rows to {out}")
+    console.print_json(json.dumps(metrics))
+
+
+@pair_app.command("hard-augment")
+def pair_hard_augment(
+    in_path: str = typer.Option(..., help="Input answer-filtered judged JSONL path."),
+    out: str = typer.Option(..., help="Output augmented answer-filtered judged JSONL path."),
+    tokenizer_name: str = typer.Option(AnswerFilterConfig.tokenizer_name, help="Tokenizer name for re-filtering generated answers."),
+    min_answer_tokens: int = typer.Option(AnswerFilterConfig.min_answer_tokens, help="Minimum answer tokens for re-filter."),
+    max_answer_tokens: int = typer.Option(AnswerFilterConfig.max_answer_tokens, help="Maximum answer tokens for re-filter."),
+    max_answer_chars: int = typer.Option(AnswerFilterConfig.max_answer_chars, help="Maximum answer characters for re-filter."),
+    drop_abstain: bool = typer.Option(AnswerFilterConfig.drop_abstain, help="Drop re-judged rows with reject decision=abstain."),
+    drop_prompt_leak: bool = typer.Option(AnswerFilterConfig.drop_prompt_leak, help="Drop answers with prompt-leak markers during re-filter."),
+    drop_option_style: bool = typer.Option(AnswerFilterConfig.drop_option_style, help="Drop option-style answers during re-filter."),
     extra_samples_per_hard: int = typer.Option(HardAugmentConfig.extra_samples_per_hard, help="Extra same-model samples per hard question."),
     resample_backend: str = typer.Option(HardAugmentConfig.resample_backend, help="Resampling backend: local or api."),
     resample_model_name: str = typer.Option(HardAugmentConfig.resample_model_name, help="Resampling model name for backend=local."),
@@ -392,10 +416,7 @@ def pair_build(
     resample_top_p: float = typer.Option(HardAugmentConfig.resample_top_p, help="Resampling top-p."),
     resample_top_k: int = typer.Option(HardAugmentConfig.resample_top_k, help="Resampling top-k."),
     resample_min_p: Optional[float] = typer.Option(HardAugmentConfig.resample_min_p, help="Resampling min-p."),
-    resample_repetition_penalty: float = typer.Option(
-        HardAugmentConfig.resample_repetition_penalty,
-        help="Resampling repetition penalty.",
-    ),
+    resample_repetition_penalty: float = typer.Option(HardAugmentConfig.resample_repetition_penalty, help="Resampling repetition penalty."),
     resample_api_model_name: str = typer.Option(HardAugmentConfig.resample_api_model_name, help="Resampling API model name."),
     resample_api_base_url: str = typer.Option(HardAugmentConfig.resample_api_base_url, help="Resampling API base URL."),
     resample_api_key_env: str = typer.Option(HardAugmentConfig.resample_api_key_env, help="Resampling API key env name."),
@@ -413,24 +434,21 @@ def pair_build(
     repair_max_new_tokens: int = typer.Option(HardAugmentConfig.repair_max_new_tokens, help="Repair max new tokens."),
     repair_temperature: float = typer.Option(HardAugmentConfig.repair_temperature, help="Repair temperature."),
     repair_top_p: float = typer.Option(HardAugmentConfig.repair_top_p, help="Repair top-p."),
-    primary_nli_model: str = typer.Option(NLIConfig.model_name, help="Primary NLI model for judging augmented answers."),
-    secondary_nli_model: Optional[str] = typer.Option(None, help="Optional secondary NLI model for judging augmented answers."),
+    nli_model: str = typer.Option(NLIConfig.model_name, help="NLI model for judging augmented answers."),
     nli_device: str = typer.Option(NLIConfig.device, help="NLI device for augmentation judgment."),
     nli_batch_size: int = typer.Option(NLIConfig.batch_size, help="NLI batch size for augmentation judgment."),
     nli_max_length: int = typer.Option(NLIConfig.max_length, help="NLI max length for augmentation judgment."),
     nli_fp16: bool = typer.Option(NLIConfig.fp16, help="Whether to enable fp16 for augmentation NLI."),
-    reference_entail_threshold: float = typer.Option(JudgeConfig.reference_entail_threshold, help="Reference entail threshold."),
-    candidate_entail_threshold: float = typer.Option(JudgeConfig.candidate_entail_threshold, help="Candidate entail threshold."),
-    candidate_contradict_threshold: float = typer.Option(JudgeConfig.candidate_contradict_threshold, help="Candidate contradiction threshold."),
-    vote_mode: str = typer.Option(JudgeConfig.vote_mode, help="Vote mode: primary | and | or."),
-    qa_similarity_model_name: Optional[str] = typer.Option(
-        JudgeConfig.qa_similarity_model_name,
-        help="Sentence-Transformer model for QA consistency in augmentation judge. Use empty string to disable.",
-    ),
-    qa_similarity_min: float = typer.Option(JudgeConfig.qa_similarity_min, help="QA similarity threshold in augmentation judge."),
+    temperature: float = typer.Option(JudgeConfig.temperature, help="Temperature scaling for augmentation judge."),
+    full_margin_threshold: float = typer.Option(JudgeConfig.full_margin_threshold, help="Method-B margin threshold for augmentation judge."),
+    reject_margin_threshold: float = typer.Option(JudgeConfig.reject_margin_threshold, help="Method-D margin threshold for augmentation judge."),
+    reject_band_half_width: float = typer.Option(JudgeConfig.reject_band_half_width, help="Method-D reject band half-width for augmentation judge."),
+    qa_fail_as_negative: bool = typer.Option(JudgeConfig.qa_fail_as_negative, help="Whether QA inconsistency forces negative in augmentation judge."),
+    qa_check_answer_type: bool = typer.Option(JudgeConfig.qa_check_answer_type, help="Enable QA type check in augmentation judge."),
+    qa_spacy_model: str = typer.Option(JudgeConfig.qa_spacy_model, help="spaCy model for QA checks in augmentation judge."),
     metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
 ) -> None:
-    """Stage 4: answer-filter -> regroup -> hard augmentation -> pair selection."""
+    """Stage 6: hard-question augmentation with re-judge and re-filter."""
 
     rows = list(read_jsonl(in_path))
 
@@ -439,46 +457,28 @@ def pair_build(
         min_answer_tokens=min_answer_tokens,
         max_answer_tokens=max_answer_tokens,
         max_answer_chars=max_answer_chars,
-        require_qa_consistent=require_qa_consistent,
-        require_reference_supported=require_reference_supported,
+        drop_abstain=drop_abstain,
         drop_prompt_leak=drop_prompt_leak,
         drop_option_style=drop_option_style,
     )
-    filtered_rows, answer_filter_metrics = apply_answer_filters(rows, answer_cfg)
-    if out_filtered_judged:
-        write_jsonl(out_filtered_judged, filtered_rows)
 
-    _, group_counts_initial = summarize_question_groups(filtered_rows)
-
-    need_augment = bool(extra_samples_per_hard > 0 or enable_api_repair)
-    judge: Optional[AnswerJudge] = None
-    if need_augment:
-        primary = NLIVerifier(
-            model_name=primary_nli_model,
-            device=nli_device,
-            batch_size=nli_batch_size,
-            max_length=nli_max_length,
-            fp16=nli_fp16,
-        )
-        secondary = None
-        if secondary_nli_model:
-            secondary = NLIVerifier(
-                model_name=secondary_nli_model,
-                device=nli_device,
-                batch_size=nli_batch_size,
-                max_length=nli_max_length,
-                fp16=nli_fp16,
-            )
-        qa_model_name = qa_similarity_model_name or None
-        judge_cfg = JudgeConfig(
-            reference_entail_threshold=reference_entail_threshold,
-            candidate_entail_threshold=candidate_entail_threshold,
-            candidate_contradict_threshold=candidate_contradict_threshold,
-            vote_mode=vote_mode,
-            qa_similarity_model_name=qa_model_name,
-            qa_similarity_min=qa_similarity_min,
-        )
-        judge = AnswerJudge(cfg=judge_cfg, primary_verifier=primary, secondary_verifier=secondary)
+    verifier = NLIVerifier(
+        model_name=nli_model,
+        device=nli_device,
+        batch_size=nli_batch_size,
+        max_length=nli_max_length,
+        fp16=nli_fp16,
+    )
+    judge_cfg = JudgeConfig(
+        temperature=temperature,
+        full_margin_threshold=full_margin_threshold,
+        reject_margin_threshold=reject_margin_threshold,
+        reject_band_half_width=reject_band_half_width,
+        qa_fail_as_negative=qa_fail_as_negative,
+        qa_check_answer_type=qa_check_answer_type,
+        qa_spacy_model=qa_spacy_model,
+    )
+    judge = AnswerJudge(cfg=judge_cfg, verifier=verifier)
 
     hard_cfg = HardAugmentConfig(
         extra_samples_per_hard=extra_samples_per_hard,
@@ -511,30 +511,23 @@ def pair_build(
         repair_top_p=repair_top_p,
     )
 
-    working_rows = list(filtered_rows)
-    resampled_rows: List[Dict[str, Any]] = []
-    resample_metrics: Dict[str, Any] = {"skipped": "augmentation_disabled"}
-    repaired_rows: List[Dict[str, Any]] = []
-    repair_metrics: Dict[str, Any] = {"skipped": "augmentation_disabled"}
-    group_counts_after_resample = dict(group_counts_initial)
+    working_rows = list(rows)
+    resampled_rows, resample_metrics = resample_hard_answers(
+        rows=working_rows,
+        hard_cfg=hard_cfg,
+        answer_filter_cfg=answer_cfg,
+        judge=judge,
+    )
+    working_rows.extend(resampled_rows)
+    _, group_counts_after_resample = summarize_question_groups(working_rows)
 
-    if judge is not None:
-        resampled_rows, resample_metrics = resample_hard_answers(
-            rows=working_rows,
-            hard_cfg=hard_cfg,
-            answer_filter_cfg=answer_cfg,
-            judge=judge,
-        )
-        working_rows.extend(resampled_rows)
-        _, group_counts_after_resample = summarize_question_groups(working_rows)
-
-        repaired_rows, repair_metrics = repair_hard_with_api(
-            rows=working_rows,
-            hard_cfg=hard_cfg,
-            answer_filter_cfg=answer_cfg,
-            judge=judge,
-        )
-        working_rows.extend(repaired_rows)
+    repaired_rows, repair_metrics = repair_hard_with_api(
+        rows=working_rows,
+        hard_cfg=hard_cfg,
+        answer_filter_cfg=answer_cfg,
+        judge=judge,
+    )
+    working_rows.extend(repaired_rows)
 
     dedup: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
     for row in working_rows:
@@ -543,32 +536,68 @@ def pair_build(
     working_rows = list(dedup.values())
 
     _, group_counts_final = summarize_question_groups(working_rows)
-    if out_augmented_judged:
-        write_jsonl(out_augmented_judged, working_rows)
-
-    pair_cfg = PairSelectConfig(
-        drop_easy=drop_easy,
-        keep_unresolved_hard=keep_unresolved_hard,
-        hard_negative_entail_weight=hard_negative_entail_weight,
-        hard_negative_edit_proximity_weight=hard_negative_edit_proximity_weight,
-        hard_negative_length_proximity_weight=hard_negative_length_proximity_weight,
-    )
-    pairs, status_counts, pair_group_counts = build_pairs(working_rows, pair_cfg)
-    write_jsonl(out, pairs)
+    write_jsonl(out, working_rows)
 
     metrics = {
         "num_input_rows": len(rows),
-        "answer_filter_metrics": answer_filter_metrics,
-        "group_counts_initial": group_counts_initial,
         "resample_metrics": resample_metrics,
         "num_resampled_rows_kept": len(resampled_rows),
         "group_counts_after_resample": group_counts_after_resample,
         "repair_metrics": repair_metrics,
         "num_repaired_rows_kept": len(repaired_rows),
         "group_counts_final": group_counts_final,
-        "num_augmented_judged_rows": len(working_rows),
+        "num_output_rows": len(working_rows),
+    }
+    if metrics_out:
+        write_json(metrics_out, metrics)
+
+    console.print(f"Saved {len(working_rows)} augmented rows to {out}")
+    console.print_json(json.dumps(metrics))
+
+
+@pair_app.command("pairing")
+def pair_pairing(
+    in_path: str = typer.Option(..., help="Input answer-filtered (optionally augmented) judged JSONL path."),
+    out: str = typer.Option(..., help="Output pair-level JSONL path."),
+    out_grouped: Optional[str] = typer.Option(None, help="Optional output grouped JSONL path for inspection."),
+    drop_easy: bool = typer.Option(PairSelectConfig.drop_easy, help="Drop easy questions after grouping."),
+    keep_unresolved_hard: bool = typer.Option(PairSelectConfig.keep_unresolved_hard, help="Keep unresolved hard questions as needs_positive."),
+    hard_negative_low_margin_weight: float = typer.Option(
+        PairSelectConfig.hard_negative_low_margin_weight,
+        help="Weight of lower margin preference when selecting hard negatives.",
+    ),
+    hard_negative_edit_proximity_weight: float = typer.Option(
+        PairSelectConfig.hard_negative_edit_proximity_weight,
+        help="Weight of edit proximity when selecting hard negatives.",
+    ),
+    hard_negative_length_proximity_weight: float = typer.Option(
+        PairSelectConfig.hard_negative_length_proximity_weight,
+        help="Weight of length proximity when selecting hard negatives.",
+    ),
+    metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
+) -> None:
+    """Stage 7: group judged rows and build one pair per question."""
+
+    rows = list(read_jsonl(in_path))
+    groups, group_counts = summarize_question_groups(rows)
+    if out_grouped:
+        write_jsonl(out_grouped, groups)
+
+    pair_cfg = PairSelectConfig(
+        drop_easy=drop_easy,
+        keep_unresolved_hard=keep_unresolved_hard,
+        hard_negative_low_margin_weight=hard_negative_low_margin_weight,
+        hard_negative_edit_proximity_weight=hard_negative_edit_proximity_weight,
+        hard_negative_length_proximity_weight=hard_negative_length_proximity_weight,
+    )
+    pairs, status_counts = build_pairs(groups=groups, cfg=pair_cfg)
+    write_jsonl(out, pairs)
+
+    metrics = {
+        "num_input_rows": len(rows),
+        "num_groups": len(groups),
+        "group_counts": group_counts,
         "num_pair_rows": len(pairs),
-        "pair_group_counts": pair_group_counts,
         "pair_status_counts": status_counts,
     }
     if metrics_out:
@@ -582,57 +611,30 @@ def pair_build(
 def filter_apply(
     in_path: str = typer.Option(..., help="Input pair-level JSONL path."),
     out: str = typer.Option(..., help="Output final DPO pair JSONL path."),
-    nli_model: str = typer.Option(NLIConfig.model_name, help="NLI model for final filtering."),
-    nli_device: str = typer.Option(NLIConfig.device, help="NLI device for final filtering."),
-    nli_batch_size: int = typer.Option(NLIConfig.batch_size, help="NLI batch size for final filtering."),
-    nli_max_length: int = typer.Option(NLIConfig.max_length, help="NLI max length for final filtering."),
-    nli_fp16: bool = typer.Option(NLIConfig.fp16, help="Whether to enable fp16 for final NLI on CUDA."),
-    entail_threshold_pos: float = typer.Option(0.60, help="Chosen entailment threshold."),
-    entail_threshold_neg: float = typer.Option(0.35, help="Rejected entailment threshold."),
     min_norm_edit: float = typer.Option(PairFilterConfig.min_norm_edit, help="Min normalized edit distance."),
     max_norm_edit: float = typer.Option(PairFilterConfig.max_norm_edit, help="Max normalized edit distance."),
     min_length_ratio: float = typer.Option(PairFilterConfig.min_length_ratio, help="Min rejected/chosen length ratio."),
     max_length_ratio: float = typer.Option(PairFilterConfig.max_length_ratio, help="Max rejected/chosen length ratio."),
-    enforce_answer_type: bool = typer.Option(PairFilterConfig.enforce_answer_type, help="Enable answer-type filter."),
-    spacy_model: str = typer.Option(PairFilterConfig.spacy_model, help="spaCy model for answer-type filter."),
-    qa_similarity_model_name: Optional[str] = typer.Option(
-        PairFilterConfig.qa_similarity_model_name,
-        help="Sentence-Transformer model for QA consistency. Use empty string to disable.",
-    ),
-    qa_similarity_min: float = typer.Option(PairFilterConfig.qa_similarity_min, help="QA consistency similarity threshold."),
+    min_margin_gap: float = typer.Option(PairFilterConfig.min_margin_gap, help="Min (chosen_margin - rejected_margin) required."),
     include_prompt: bool = typer.Option(
         False,
         help="Whether to include prompt field in final exported pairs.",
     ),
     metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
 ) -> None:
-    """Stage 5: final pair filtering and export for downstream DPO preprocessing."""
+    """Stage 8: final pair filtering without re-running NLI."""
 
     rows = list(read_jsonl(in_path))
-    verifier = NLIVerifier(
-        model_name=nli_model,
-        device=nli_device,
-        batch_size=nli_batch_size,
-        max_length=nli_max_length,
-        fp16=nli_fp16,
-    )
-    qa_model_name = qa_similarity_model_name or None
     cfg = PairFilterConfig(
         min_norm_edit=min_norm_edit,
         max_norm_edit=max_norm_edit,
         min_length_ratio=min_length_ratio,
         max_length_ratio=max_length_ratio,
-        enforce_answer_type=enforce_answer_type,
-        spacy_model=spacy_model,
-        qa_similarity_model_name=qa_model_name,
-        qa_similarity_min=qa_similarity_min,
+        min_margin_gap=min_margin_gap,
     )
     kept, metrics = apply_pair_filters(
         rows=rows,
         cfg=cfg,
-        verifier=verifier,
-        entail_threshold_pos=entail_threshold_pos,
-        entail_threshold_neg=entail_threshold_neg,
         include_prompt=include_prompt,
     )
     write_jsonl(out, kept)
@@ -650,7 +652,7 @@ def audit_surface(
     out: str = typer.Option(..., help="Output audit JSON path."),
     separability_threshold: float = typer.Option(AuditConfig.separability_threshold, help="Flag threshold for feature separability."),
 ) -> None:
-    """Stage 6: run a lightweight surface-signal separability audit."""
+    """Stage 9: run a lightweight surface-signal separability audit."""
 
     rows = list(read_jsonl(in_path))
     cfg = AuditConfig(separability_threshold=separability_threshold)
@@ -674,7 +676,7 @@ def bucket_difficulty(
     medium_max_delta: float = typer.Option(DifficultyConfig.medium_max_delta, help="Medium bucket upper bound for delta."),
     metrics_out: Optional[str] = typer.Option(None, help="Optional JSON metrics output path."),
 ) -> None:
-    """Stage 7: assign easy/medium/hard buckets using policy log-prob gaps."""
+    """Stage 10: assign easy/medium/hard buckets using policy log-prob gaps."""
 
     rows = list(read_jsonl(in_path))
     cfg = DifficultyConfig(

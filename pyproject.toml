@@ -28,7 +28,7 @@ eval = ["deepeval>=2.0.0"]
 [project.scripts]
 meqng = "meqng.cli:app"
 ssqpg = "ssqpg.cli:app"
-nli-verifier = "nli_judge.verifier:app"
+qa-verifier = "qa_judge.verifier:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

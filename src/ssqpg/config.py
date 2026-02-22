@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
-
-from nli_judge.config import JudgeConfig, NLIConfig
+from qa_judge.config import JudgeConfig, NLIConfig
 
 @dataclass(frozen=True)
 class HaluEvalSourceConfig:
@@ -72,8 +71,7 @@ class AnswerFilterConfig:
     min_answer_tokens: int = 1
     max_answer_tokens: int = 256
     max_answer_chars: int = 1200
-    require_qa_consistent: bool = True
-    require_reference_supported: bool = True
+    drop_abstain: bool = True
     drop_prompt_leak: bool = True
     drop_option_style: bool = True
 
@@ -84,7 +82,7 @@ class PairSelectConfig:
 
     drop_easy: bool = True
     keep_unresolved_hard: bool = False
-    hard_negative_entail_weight: float = 0.55
+    hard_negative_low_margin_weight: float = 0.55
     hard_negative_edit_proximity_weight: float = 0.30
     hard_negative_length_proximity_weight: float = 0.15
 
@@ -136,12 +134,9 @@ class PairFilterConfig:
 
     min_norm_edit: float = 0.001
     max_norm_edit: float = 0.8
-    min_length_ratio: float = 0.333
-    max_length_ratio: float = 3
-    enforce_answer_type: bool = True
-    spacy_model: str = "en_core_web_trf"
-    qa_similarity_model_name: Optional[str] = "sentence-transformers/all-MiniLM-L6-v2"
-    qa_similarity_min: float = 0.60
+    min_length_ratio: float = 0.25
+    max_length_ratio: float = 4
+    min_margin_gap: float = 0.6
 
 
 @dataclass(frozen=True)

@@ -5,12 +5,12 @@ import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
-    from nli_judge.config import NLIConfig
-    from nli_judge.nli import NLIVerifier
+    from qa_judge.config import NLIConfig
+    from qa_judge.nli import NLIVerifier
     from prompt import build_qa_premise
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
-    from nli_judge.config import NLIConfig
-    from nli_judge.nli import NLIVerifier
+    from qa_judge.config import NLIConfig
+    from qa_judge.nli import NLIVerifier
     from prompt import build_qa_premise
 
 from dataio import write_jsonl

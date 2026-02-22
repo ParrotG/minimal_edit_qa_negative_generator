@@ -18,7 +18,7 @@ def _count_tokens(tokenizer: AutoTokenizer, text: str) -> int:
 
 
 def apply_answer_filters(rows: Sequence[Dict[str, Any]], cfg: AnswerFilterConfig) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """Apply single-answer filters to judged rows before question-level pairing."""
+    """Apply single-answer filters to judged rows before grouping/pairing."""
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name, use_fast=True)
 
@@ -31,14 +31,14 @@ def apply_answer_filters(rows: Sequence[Dict[str, Any]], cfg: AnswerFilterConfig
         "drop_max_chars": 0,
         "drop_prompt_leak": 0,
         "drop_option_style": 0,
-        "drop_qa_consistency": 0,
-        "drop_reference_support": 0,
+        "drop_abstain": 0,
     }
 
     kept: List[Dict[str, Any]] = []
     for row in rows:
         answer = normalize_whitespace(str(row.get("answer") or ""))
         judge = row.get("judge") or {}
+        reject_decision = str((judge.get("reject_aware") or {}).get("decision") or "")
         reason = "ok"
 
         token_count = _count_tokens(tokenizer, answer) if answer else 0
@@ -62,12 +62,9 @@ def apply_answer_filters(rows: Sequence[Dict[str, Any]], cfg: AnswerFilterConfig
         elif cfg.drop_option_style and bool(_OPTION_STYLE_RE.search(answer)):
             reason = "option_style"
             counts["drop_option_style"] += 1
-        elif cfg.require_qa_consistent and bool(judge.get("qa_consistent") is False):
-            reason = "qa_consistency"
-            counts["drop_qa_consistency"] += 1
-        elif cfg.require_reference_supported and bool(judge.get("has_reference")) and not bool(judge.get("reference_supported_primary", False)):
-            reason = "reference_support"
-            counts["drop_reference_support"] += 1
+        elif cfg.drop_abstain and reject_decision == "abstain":
+            reason = "abstain"
+            counts["drop_abstain"] += 1
 
         out_row = dict(row)
         out_row["answer"] = answer
@@ -76,6 +73,7 @@ def apply_answer_filters(rows: Sequence[Dict[str, Any]], cfg: AnswerFilterConfig
             "reason": reason,
             "answer_tokens": token_count,
             "answer_chars": char_count,
+            "reject_decision": reject_decision or None,
         }
         if reason == "ok":
             kept.append(out_row)
