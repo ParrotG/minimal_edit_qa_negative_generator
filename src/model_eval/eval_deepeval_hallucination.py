@@ -22,10 +22,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
 
     # DeepEval Hallucination metric
-    parser.add_argument("--judge_model", type=str, default="gpt-4.1")
+    parser.add_argument("--judge_model", type=str, default="gpt-5.2")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--max_concurrent", type=int, default=4)
-    parser.add_argument("--throttle_value", type=float, default=5.0)
+    parser.add_argument("--throttle_value", type=float, default=3.0)
 
     # Outputs
     parser.add_argument("--metrics_out", type=str, required=True, help="Summary metrics CSV output path.")

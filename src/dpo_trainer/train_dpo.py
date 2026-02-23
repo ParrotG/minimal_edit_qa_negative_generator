@@ -24,18 +24,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for LoRA adapter checkpoints.")
     parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen3-0.6B")
 
-    parser.add_argument("--train_epochs", type=float, default=1.0)
+    parser.add_argument("--train_epochs", type=float, default=2)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
     parser.add_argument("--beta", type=float, default=0.1)
-    parser.add_argument("--train_batch_size", type=int, default=2)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
+    parser.add_argument("--train_batch_size", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max_prompt_length", type=int, default=2048)
-    parser.add_argument("--max_length", type=int, default=4096)
+    parser.add_argument("--max_prompt_length", type=int, default=512)
+    parser.add_argument("--max_length", type=int, default=768)
 
-    parser.add_argument("--label_smoothing", type=float, default=0.0)
-    parser.add_argument("--save_steps", type=int, default=200)
-    parser.add_argument("--save_total_limit", type=int, default=2)
+    parser.add_argument("--label_smoothing", type=float, default=0.1)
+    parser.add_argument("--save_steps", type=int, default=20)
+    parser.add_argument("--save_total_limit", type=int, default=100)
+    parser.add_argument("--precompute_ref_log_probs", action="store_true")
 
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
@@ -63,18 +64,14 @@ def _build_dpo_config(args: argparse.Namespace, has_eval: bool) -> DPOConfig:
         "save_steps": args.save_steps,
         "save_total_limit": args.save_total_limit,
         "label_smoothing": args.label_smoothing,
+        "precompute_ref_log_probs": args.precompute_ref_log_probs,
         "remove_unused_columns": False,
     }
     if has_eval:
-        kwargs["evaluation_strategy"] = "steps"
+        kwargs["eval_strategy"] = "steps"
         kwargs["eval_steps"] = args.save_steps
 
-    try:
-        return DPOConfig(**kwargs)
-    except TypeError:
-        if "evaluation_strategy" in kwargs:
-            kwargs["eval_strategy"] = kwargs.pop("evaluation_strategy")
-        return DPOConfig(**kwargs)
+    return DPOConfig(**kwargs)
 
 
 def _build_trainer(
@@ -138,7 +135,7 @@ def main() -> None:
         else:
             raise ValueError("Tokenizer has no pad/eos/unk token.")
 
-    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, torch_dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, dtype="auto")
     model.config.use_cache = False
 
     target_modules = [x.strip() for x in args.lora_target_modules.split(",") if x.strip()]

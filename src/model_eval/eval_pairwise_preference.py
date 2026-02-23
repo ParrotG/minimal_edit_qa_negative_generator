@@ -35,11 +35,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max_length",
         type=int,
-        default=4096,
+        default=768,
         help="Max total length for prompt+completion tokenization in log-prob computation.",
     )
 
-    parser.add_argument("--base_model", type=str, default=None, help="Base model name/path for LoRA adapter checkpoints.")
+    parser.add_argument("--base_model", type=str, default="Qwen/Qwen3-0.6B", help="Base model name/path for LoRA adapter checkpoints.")
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="Single LoRA adapter checkpoint path.")
     parser.add_argument(
         "--lora_ckpt_list_path",
