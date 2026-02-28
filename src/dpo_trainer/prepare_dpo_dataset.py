@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import shutil
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
 from transformers import AutoTokenizer
 
 try:
@@ -42,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--build_halueval_compare",
         action="store_true",
-        help="Build a comparison dataset from original HaluEval rows indexed by the same ids.",
+        help="Build a comparison dataset from original HaluEval QA data.",
     )
     parser.add_argument(
         "--compare_output_dir",
@@ -53,6 +54,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--halueval_dataset_name", type=str, default="pminervini/HaluEval")
     parser.add_argument("--halueval_subset", type=str, default="qa")
     parser.add_argument("--halueval_split", type=str, default="data")
+    parser.add_argument(
+        "--halueval_compare_mode",
+        type=str,
+        choices=["random", "id_match"],
+        default="random",
+        help="Comparison set construction mode: random sampling (default) or id match to source rows.",
+    )
+    parser.add_argument(
+        "--exclude_main_train_from_compare_test",
+        action="store_true",
+        help=(
+            "When enabled, remove rows from compare test split whose source_id appears in main train split, "
+            "then resample replacements from HaluEval without touching compare train/validation splits."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -293,6 +309,243 @@ def _build_halueval_compare_rows(
     return out, metrics
 
 
+def _build_halueval_random_rows(
+    *,
+    target_count: int,
+    tokenizer: AutoTokenizer,
+    length_cfg: LengthFilterConfig,
+    dataset_name: str,
+    subset: str,
+    split: str,
+    seed: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    if target_count <= 0:
+        raise ValueError("target_count must be positive for random HaluEval sampling.")
+
+    ds = load_dataset(dataset_name, subset, split=split)
+    indices = list(range(len(ds)))
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+
+    rows: List[Dict[str, Any]] = []
+    metrics = {
+        "num_hf_rows": len(ds),
+        "target_count": target_count,
+        "num_scanned": 0,
+        "drop_missing_fields": 0,
+        "drop_prompt_too_long": 0,
+        "drop_total_too_long": 0,
+        "num_selected": 0,
+    }
+
+    for idx in indices:
+        if len(rows) >= target_count:
+            break
+
+        metrics["num_scanned"] += 1
+        row = ds[idx]
+        knowledge = str(row.get("knowledge") or "").strip()
+        question = str(row.get("question") or "").strip()
+        chosen = str(row.get("right_answer") or "").strip()
+        rejected = str(row.get("hallucinated_answer") or "").strip()
+        if not knowledge or not question or not chosen or not rejected:
+            metrics["drop_missing_fields"] += 1
+            continue
+
+        prompt = build_qa_answer_prefix(knowledge=knowledge, question=question)
+        prompt_len = _token_len(tokenizer, prompt)
+        chosen_len = _token_len(tokenizer, chosen)
+        rejected_len = _token_len(tokenizer, rejected)
+
+        if prompt_len > length_cfg.max_prompt_tokens:
+            metrics["drop_prompt_too_long"] += 1
+            continue
+        if (
+            prompt_len + chosen_len > length_cfg.max_total_tokens
+            or prompt_len + rejected_len > length_cfg.max_total_tokens
+        ):
+            metrics["drop_total_too_long"] += 1
+            continue
+
+        rows.append(
+            {
+                "task": "qa_halueval_compare",
+                "source_id": str(idx),
+                "id": str(idx),
+                "knowledge": knowledge,
+                "question": question,
+                "prompt": prompt,
+                "chosen": chosen,
+                "rejected": rejected,
+                "prompt_tokens": int(prompt_len),
+                "chosen_tokens": int(chosen_len),
+                "rejected_tokens": int(rejected_len),
+                "chosen_total_tokens": int(prompt_len + chosen_len),
+                "rejected_total_tokens": int(prompt_len + rejected_len),
+            }
+        )
+
+    metrics["num_selected"] = len(rows)
+    if len(rows) < target_count:
+        raise RuntimeError(
+            f"Cannot sample enough valid random HaluEval rows: target={target_count}, selected={len(rows)}. "
+            "Please relax length constraints or reduce input size."
+        )
+    return rows, metrics
+
+
+def _build_halueval_row_if_valid(
+    *,
+    row_index: int,
+    row: Dict[str, Any],
+    tokenizer: AutoTokenizer,
+    length_cfg: LengthFilterConfig,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Build one normalized compare row if it passes all checks."""
+
+    knowledge = str(row.get("knowledge") or "").strip()
+    question = str(row.get("question") or "").strip()
+    chosen = str(row.get("right_answer") or "").strip()
+    rejected = str(row.get("hallucinated_answer") or "").strip()
+    if not knowledge or not question or not chosen or not rejected:
+        return None, "missing_fields"
+
+    prompt = build_qa_answer_prefix(knowledge=knowledge, question=question)
+    prompt_len = _token_len(tokenizer, prompt)
+    chosen_len = _token_len(tokenizer, chosen)
+    rejected_len = _token_len(tokenizer, rejected)
+
+    if prompt_len > length_cfg.max_prompt_tokens:
+        return None, "prompt_too_long"
+    if prompt_len + chosen_len > length_cfg.max_total_tokens or prompt_len + rejected_len > length_cfg.max_total_tokens:
+        return None, "total_too_long"
+
+    return (
+        {
+            "task": "qa_halueval_compare",
+            "source_id": str(row_index),
+            "id": str(row_index),
+            "knowledge": knowledge,
+            "question": question,
+            "prompt": prompt,
+            "chosen": chosen,
+            "rejected": rejected,
+            "prompt_tokens": int(prompt_len),
+            "chosen_tokens": int(chosen_len),
+            "rejected_tokens": int(rejected_len),
+            "chosen_total_tokens": int(prompt_len + chosen_len),
+            "rejected_total_tokens": int(prompt_len + rejected_len),
+        },
+        None,
+    )
+
+
+def _replace_compare_test_overlap(
+    *,
+    compare_ds: DatasetDict,
+    main_train_ids: Set[str],
+    tokenizer: AutoTokenizer,
+    length_cfg: LengthFilterConfig,
+    dataset_name: str,
+    subset: str,
+    split: str,
+    seed: int,
+) -> Tuple[DatasetDict, Dict[str, int]]:
+    """Remove test overlap with main train ids and refill replacements from HaluEval."""
+
+    if "test" not in compare_ds:
+        return compare_ds, {"num_test_input": 0, "num_removed_overlap": 0, "num_replaced": 0}
+
+    test_ds = compare_ds["test"]
+    keep_rows: List[Dict[str, Any]] = []
+    removed = 0
+    for row in test_ds:
+        if str(row.get("source_id")) in main_train_ids:
+            removed += 1
+            continue
+        keep_rows.append(dict(row))
+
+    if removed == 0:
+        return (
+            compare_ds,
+            {
+                "num_test_input": len(test_ds),
+                "num_removed_overlap": 0,
+                "num_replaced": 0,
+                "drop_missing_fields": 0,
+                "drop_prompt_too_long": 0,
+                "drop_total_too_long": 0,
+            },
+        )
+
+    ds_hf = load_dataset(dataset_name, subset, split=split)
+    used_ids: Set[str] = set()
+    for split_name in compare_ds.keys():
+        for row in compare_ds[split_name]:
+            used_ids.add(str(row.get("source_id")))
+    # Removed test rows should still be considered used to avoid reintroducing identical samples.
+    for row in test_ds:
+        used_ids.add(str(row.get("source_id")))
+
+    indices = list(range(len(ds_hf)))
+    rng = random.Random(seed + 9973)
+    rng.shuffle(indices)
+
+    replacements: List[Dict[str, Any]] = []
+    drop_missing_fields = 0
+    drop_prompt_too_long = 0
+    drop_total_too_long = 0
+
+    for idx in indices:
+        if len(replacements) >= removed:
+            break
+        sid = str(idx)
+        if sid in used_ids or sid in main_train_ids:
+            continue
+        built_row, reason = _build_halueval_row_if_valid(
+            row_index=idx,
+            row=ds_hf[idx],
+            tokenizer=tokenizer,
+            length_cfg=length_cfg,
+        )
+        if built_row is None:
+            if reason == "missing_fields":
+                drop_missing_fields += 1
+            elif reason == "prompt_too_long":
+                drop_prompt_too_long += 1
+            elif reason == "total_too_long":
+                drop_total_too_long += 1
+            continue
+        replacements.append(built_row)
+        used_ids.add(sid)
+
+    if len(replacements) < removed:
+        raise RuntimeError(
+            f"Failed to refill compare test split after overlap removal: need={removed}, got={len(replacements)}."
+        )
+
+    new_test = concatenate_datasets(
+        [
+            Dataset.from_list(keep_rows),
+            Dataset.from_list(replacements),
+        ]
+    ).shuffle(seed=seed)
+
+    new_ds = DatasetDict({k: compare_ds[k] for k in compare_ds.keys() if k != "test"})
+    new_ds["test"] = new_test
+    return (
+        new_ds,
+        {
+            "num_test_input": len(test_ds),
+            "num_removed_overlap": removed,
+            "num_replaced": len(replacements),
+            "drop_missing_fields": drop_missing_fields,
+            "drop_prompt_too_long": drop_prompt_too_long,
+            "drop_total_too_long": drop_total_too_long,
+        },
+    )
+
+
 def _truncate_rows(rows: Sequence[Dict[str, Any]], max_samples: int) -> List[Dict[str, Any]]:
     if max_samples is None or max_samples <= 0:
         return list(rows)
@@ -358,14 +611,32 @@ def main() -> None:
     if not compare_output_dir:
         compare_output_dir = f"{args.output_dir.rstrip('/')}_halueval_compare"
 
-    compare_rows, compare_row_metrics = _build_halueval_compare_rows(
-        source_rows=normalized_rows,
-        dataset_name=args.halueval_dataset_name,
-        subset=args.halueval_subset,
-        split=args.halueval_split,
-    )
-    compare_rows = _truncate_rows(compare_rows, args.max_samples)
-    compare_filtered_rows, compare_filter_metrics = _filter_by_length(compare_rows, tokenizer, length_cfg)
+    compare_filter_metrics: Dict[str, int]
+    if args.halueval_compare_mode == "id_match":
+        compare_rows, compare_row_metrics = _build_halueval_compare_rows(
+            source_rows=normalized_rows,
+            dataset_name=args.halueval_dataset_name,
+            subset=args.halueval_subset,
+            split=args.halueval_split,
+        )
+        compare_rows = _truncate_rows(compare_rows, args.max_samples)
+        compare_filtered_rows, compare_filter_metrics = _filter_by_length(compare_rows, tokenizer, length_cfg)
+    else:
+        compare_filtered_rows, compare_row_metrics = _build_halueval_random_rows(
+            target_count=len(filtered_rows),
+            tokenizer=tokenizer,
+            length_cfg=length_cfg,
+            dataset_name=args.halueval_dataset_name,
+            subset=args.halueval_subset,
+            split=args.halueval_split,
+            seed=args.seed,
+        )
+        compare_filter_metrics = {
+            "num_input": int(compare_row_metrics["num_scanned"]),
+            "num_kept": int(compare_row_metrics["num_selected"]),
+            "drop_prompt_too_long": int(compare_row_metrics["drop_prompt_too_long"]),
+            "drop_total_too_long": int(compare_row_metrics["drop_total_too_long"]),
+        }
     compare_ds = _split_rows(
         compare_filtered_rows,
         seed=args.seed,
@@ -374,12 +645,27 @@ def main() -> None:
         test_ratio=test_ratio,
     )
 
+    compare_overlap_metrics: Optional[Dict[str, int]] = None
+    if args.exclude_main_train_from_compare_test:
+        main_train_ids = {str(x) for x in main_ds["train"]["source_id"]}
+        compare_ds, compare_overlap_metrics = _replace_compare_test_overlap(
+            compare_ds=compare_ds,
+            main_train_ids=main_train_ids,
+            tokenizer=tokenizer,
+            length_cfg=length_cfg,
+            dataset_name=args.halueval_dataset_name,
+            subset=args.halueval_subset,
+            split=args.halueval_split,
+            seed=args.seed,
+        )
+
     _prepare_output_dir(compare_output_dir, overwrite=args.overwrite_output)
     compare_stats = {
         "source_from_ids_of": args.in_jsonl,
         "halueval_dataset_name": args.halueval_dataset_name,
         "halueval_subset": args.halueval_subset,
         "halueval_split": args.halueval_split,
+        "halueval_compare_mode": args.halueval_compare_mode,
         "tokenizer_name": args.tokenizer_name,
         "ratios": {
             "train": train_ratio,
@@ -388,6 +674,8 @@ def main() -> None:
         },
         "row_metrics": compare_row_metrics,
         "filter_metrics": compare_filter_metrics,
+        "exclude_main_train_from_compare_test": bool(args.exclude_main_train_from_compare_test),
+        "overlap_fix_metrics": compare_overlap_metrics,
         "split_sizes": {k: len(v) for k, v in compare_ds.items()},
     }
     _save_dataset_with_stats(output_dir=compare_output_dir, dataset=compare_ds, stats=compare_stats)

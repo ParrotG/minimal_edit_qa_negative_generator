@@ -7,6 +7,7 @@ from deepeval import evaluate
 from deepeval.evaluate.configs import AsyncConfig, DisplayConfig
 from deepeval.metrics import HallucinationMetric
 from deepeval.test_case import LLMTestCase
+from deepeval.models import GPTModel
 
 from dataio import write_jsonl
 from .common import load_generated_rows, write_csv
@@ -62,9 +63,18 @@ def main() -> None:
             )
         )
 
+    judge = GPTModel(
+        model=args.judge_model,
+        temperature=0,
+        generation_kwargs={
+            # Increase output budget so structured JSON can finish
+            "max_completion_tokens": 1024,
+        },
+    )
+    
     metric = HallucinationMetric(
         threshold=args.threshold,
-        model=args.judge_model,
+        model=judge,
         async_mode=True,
     )
     result = evaluate(
