@@ -29,6 +29,7 @@ eval = ["deepeval>=2.0.0"]
 meqng = "meqng.cli:app"
 ssqpg = "ssqpg.cli:app"
 qa-verifier = "qa_judge.verifier:app"
+grounded-qa = "grounded_qa.cli:app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
