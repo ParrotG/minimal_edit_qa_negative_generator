@@ -11,7 +11,7 @@ class TeacherGenerationConfig:
 
     prompt_style: str = "teacher_v1"
     num_candidates_per_example: int = 2
-    api_model_name: str = "qwen-plus"
+    api_model_name: str = "qwen3.5-plus"
     api_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     api_key_env: str = "DASHSCOPE_API_KEY"
     api_timeout_seconds: float = 90.0

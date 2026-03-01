@@ -35,5 +35,6 @@ class StructuredQaOutput(BaseModel):
 
     answerability: Answerability
     evidence: list[EvidenceQuote]
+    rationale: str = Field(min_length=1)
     answer: str = Field(min_length=1)
     confidence: ConfidenceLevel

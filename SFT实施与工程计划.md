@@ -9,6 +9,7 @@
 - 结构化输出的 JSON 字段顺序暂固定为：
   - `answerability`
   - `evidence`
+  - `rationale`
   - `answer`
   - `confidence`
 - 拒答模板使用小集合，训练集构建时默认收敛为 canonical 模板，检查时允许模板集合。
@@ -21,6 +22,7 @@
 - 原始 gold `reference_answer` 不强行改写为固定句式。
 - teacher 的职责不是替代 gold，而是在约束下输出更适合结构化训练的样本：
   - `evidence` 必须从 supporting facts 或 support window 中抽取。
+  - `rationale` 必须给出从证据到答案的简短推导，且不能与 `answer` 完全相同。
   - `answer` 必须与 baseline 语义一致。
   - 在正确度保持的前提下，尽量保留原始答案分布和形式。
 - 自动选择 teacher 候选时，优先满足：
@@ -132,6 +134,7 @@ src/
 
 - protocol 检查。
 - evidence quote 检查。
+- rationale 检查。
 - correctness 检查。
 - 结构化语义检查适配。
 - teacher 候选选择与 `derived_confidence` 打分。

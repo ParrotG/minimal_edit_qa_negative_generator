@@ -23,6 +23,7 @@
 {
   "answerability": "answerable | unanswerable",
   "evidence": [{"quote": "..."}],
+  "rationale": "...",
   "answer": "...",
   "confidence": "high | medium | low"
 }
@@ -35,10 +36,12 @@
 协议约束：
 - **unanswerable 规则**：当 `answerability = unanswerable` 时
   - `evidence` 必须为空数组 `[]`
+  - `rationale` 必须简要说明知识不足，且不能与 `answer` 完全相同
   - `answer` 必须是拒答模板集合之一
 - **answerable 规则**：当 `answerability = answerable` 时
   - `evidence` 至少 1 条，最多 K 条（默认 K=3）
   - 每条 `quote` 必须是 knowledge 原文子串（归一化后精确匹配）
+  - `rationale` 必须简短描述从 evidence 到 answer 的推导
   - `answer` 必须直接回答 question，保持短且明确
 
 ### 拒答模板
@@ -76,7 +79,7 @@ v1 先固定为小集合，便于训练与验证：
 - `evidence` 必须为数组
 
 1.2 **长度与预算校验**
-- `answer`、`evidence.quote` 的长度上限
+- `answer`、`rationale`、`evidence.quote` 的长度上限
 - 整体 token 上限
 
 ### 2) 引用检查器
@@ -239,4 +242,3 @@ DPO 总体思路保持，但必须调整为与 SFT 后协议一致：
 - pair 过滤需要增加 schema-valid / quote-valid / answerability 一致性等条件
 
 该部分暂不执行，但需要在新增模块中注意预留相应的可扩展空间
-
