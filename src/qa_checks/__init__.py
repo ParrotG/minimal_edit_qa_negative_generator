@@ -10,7 +10,7 @@ from .report import (
     SemanticCheckReport,
     ValidationReport,
 )
-from .selection import derive_confidence_label, score_validation_report, select_best_candidates
+from .selection import assign_quantile_confidence_labels, score_validation_report, select_best_candidates
 from .semantics import evaluate_structured_semantics
 
 __all__ = [
@@ -24,7 +24,7 @@ __all__ = [
     "check_evidence_against_supporting_facts",
     "check_evidence_quotes",
     "check_protocol_constraints",
-    "derive_confidence_label",
+    "assign_quantile_confidence_labels",
     "score_validation_report",
     "select_best_candidates",
     "evaluate_structured_semantics",

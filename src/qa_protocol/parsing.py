@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 
-from .normalize import ordered_output_dict
+from .normalize import canonicalize_raw_text, canonicalize_structured_output, ordered_output_dict
 from .schema import StructuredQaOutput
 from .spec import DEFAULT_PROTOCOL_SPEC, ProtocolSpec
 
@@ -36,13 +36,14 @@ def parse_structured_output(
     """Parse one raw text into a validated structured output."""
 
     _ = spec
-    raw_text = str(text or "").strip()
+    raw_text = canonicalize_raw_text(text)
     if not raw_text:
         return ParseResult(ok=False, raw_text=raw_text, errors=("Empty model output.",))
 
     try:
         json_text = _extract_json_span(raw_text)
         parsed = StructuredQaOutput.model_validate_json(json_text)
+        parsed = canonicalize_structured_output(parsed)
         return ParseResult(ok=True, raw_text=raw_text, parsed=parsed, errors=())
     except (ValueError, ValidationError, json.JSONDecodeError) as exc:
         return ParseResult(ok=False, raw_text=raw_text, errors=(str(exc),))
@@ -51,7 +52,7 @@ def parse_structured_output(
 def validate_structured_payload(payload: Any) -> StructuredQaOutput:
     """Validate an already-decoded payload against the protocol schema."""
 
-    return StructuredQaOutput.model_validate(payload)
+    return canonicalize_structured_output(StructuredQaOutput.model_validate(payload))
 
 
 def to_canonical_json(

@@ -140,6 +140,8 @@ def teacher_generate(
     temperature: float = typer.Option(TeacherGenerationConfig.temperature, help="Sampling temperature."),
     top_p: float = typer.Option(TeacherGenerationConfig.top_p, help="Sampling top-p."),
     seed: int = typer.Option(TeacherGenerationConfig.seed, help="Random seed."),
+    prefilter_tokenizer_name: str = typer.Option(TeacherGenerationConfig.prefilter_tokenizer_name, help="Tokenizer name used for prompt prefilter."),
+    max_prompt_tokens: int = typer.Option(TeacherGenerationConfig.max_prompt_tokens, help="Maximum prompt tokens allowed before teacher generation."),
     metrics_out: Optional[str] = typer.Option(None, help="Optional metrics JSON path."),
 ) -> None:
     """Generate teacher candidates with an OpenAI-compatible API."""
@@ -163,6 +165,8 @@ def teacher_generate(
             temperature=temperature,
             top_p=top_p,
             seed=seed,
+            prefilter_tokenizer_name=prefilter_tokenizer_name,
+            max_prompt_tokens=max_prompt_tokens,
         ),
     )
     console.print(f"Saved teacher candidates to {out}")
@@ -175,7 +179,10 @@ def teacher_validate(
     out: str = typer.Option(..., help="Output validated candidate JSONL path."),
     selected_out: Optional[str] = typer.Option(None, help="Optional output path for one selected candidate per example."),
     enable_semantics: bool = typer.Option(ValidationConfig.enable_semantics, help="Enable structured semantic verification."),
-    use_support_window_knowledge: bool = typer.Option(ValidationConfig.use_support_window_knowledge, help="Prefer support-window knowledge for semantics."),
+    semantic_drop_by_nli: bool = typer.Option(ValidationConfig.semantic_drop_by_nli, help="Drop samples rejected by the semantic verifier."),
+    semantic_decision_source: str = typer.Option(ValidationConfig.semantic_decision_source, help="Semantic decision source: full_binary or reject_aware."),
+    tokenizer_name: str = typer.Option(ValidationConfig.tokenizer_name, help="Tokenizer name used for completion length checks."),
+    max_completion_tokens: int = typer.Option(ValidationConfig.max_completion_tokens, help="Maximum canonical completion tokens."),
     semantic_match_f1_threshold: float = typer.Option(CorrectnessConfig.semantic_match_f1_threshold, help="Reference-answer F1 threshold."),
     metrics_out: Optional[str] = typer.Option(None, help="Optional metrics JSON path."),
 ) -> None:
@@ -188,7 +195,10 @@ def teacher_validate(
         metrics_out=metrics_out,
         validation_cfg=ValidationConfig(
             enable_semantics=enable_semantics,
-            use_support_window_knowledge=use_support_window_knowledge,
+            semantic_drop_by_nli=semantic_drop_by_nli,
+            semantic_decision_source=semantic_decision_source,
+            tokenizer_name=tokenizer_name,
+            max_completion_tokens=max_completion_tokens,
         ),
         correctness_cfg=CorrectnessConfig(
             semantic_match_f1_threshold=semantic_match_f1_threshold,

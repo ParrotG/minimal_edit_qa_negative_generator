@@ -23,6 +23,8 @@ class TeacherGenerationConfig:
     temperature: float = 0.2
     top_p: float = 0.95
     seed: int = 42
+    prefilter_tokenizer_name: str = "Qwen/Qwen3-0.6B"
+    max_prompt_tokens: int = 512
 
     def to_api_config(self) -> ApiGenerationConfig:
         """Convert to the reusable API generation config."""
@@ -46,8 +48,13 @@ class TeacherGenerationConfig:
 class ValidationConfig:
     """Validation defaults for teacher candidates."""
 
-    enable_semantics: bool = False
-    use_support_window_knowledge: bool = True
+    enable_semantics: bool = True
+    semantic_drop_by_nli: bool = True
+    semantic_decision_source: str = "full_binary"
+    tokenizer_name: str = "Qwen/Qwen3-0.6B"
+    max_completion_tokens: int = 512
+    prefilter_tokenizer_name: str = "Qwen/Qwen3-0.6B"
+    max_prompt_tokens: int = 512
 
 
 @dataclass(frozen=True)

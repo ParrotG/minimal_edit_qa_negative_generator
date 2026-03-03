@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, replace
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from dataclasses import asdict
+from typing import Any, Dict, List, Optional
 
 from dataio import read_jsonl, write_json, write_jsonl
 from llm_textgen.api_client import OpenAICompatibleTextGenerator
@@ -12,12 +12,12 @@ from qa_checks import (
     check_evidence_against_supporting_facts,
     check_evidence_quotes,
     check_protocol_constraints,
-    derive_confidence_label,
     evaluate_structured_semantics,
     score_validation_report,
     select_best_candidates,
 )
-from qa_checks.report import CorrectnessCheckReport, EvidenceCheckReport, ProtocolCheckReport, ValidationReport
+from qa_checks.report import CorrectnessCheckReport, EvidenceCheckReport, ProtocolCheckReport, SemanticCheckReport, ValidationReport
+from qa_checks.selection import assign_quantile_confidence_labels
 from qa_data import (
     ConstructionConfig,
     HotpotSourceConfig,
@@ -37,8 +37,10 @@ from qa_protocol import (
     DEFAULT_PROTOCOL_SPEC,
     build_infer_prompt,
     build_teacher_prompt,
+    count_text_tokens,
     parse_structured_output,
     to_canonical_json,
+    validate_structured_payload,
 )
 from qa_protocol.spec import ProtocolSpec
 from sft_trainer.formatting import build_sft_record
@@ -138,6 +140,16 @@ def split_examples(
     return metrics
 
 
+def _prompt_within_budget(row: Dict[str, Any], cfg: TeacherGenerationConfig, spec: ProtocolSpec) -> tuple[bool, int, str]:
+    prompt = build_infer_prompt(
+        knowledge=str(row.get("knowledge") or "").strip(),
+        question=str(row.get("question") or "").strip(),
+        spec=spec,
+    )
+    prompt_tokens = count_text_tokens(prompt, cfg.prefilter_tokenizer_name)
+    return prompt_tokens <= cfg.max_prompt_tokens, prompt_tokens, prompt
+
+
 def generate_teacher_candidates(
     *,
     in_path: str,
@@ -154,7 +166,16 @@ def generate_teacher_candidates(
 
     prompts: List[str] = []
     jobs: List[Dict[str, Any]] = []
+    num_drop_prompt_over_budget = 0
+    num_retained_examples = 0
+
     for row in rows:
+        within_budget, prompt_tokens, prefilter_prompt = _prompt_within_budget(row, cfg, spec)
+        if not within_budget:
+            num_drop_prompt_over_budget += 1
+            continue
+
+        num_retained_examples += 1
         for candidate_idx in range(cfg.num_candidates_per_example):
             prompt = build_teacher_prompt(
                 knowledge=str(row.get("knowledge") or "").strip(),
@@ -167,6 +188,8 @@ def generate_teacher_candidates(
                     "row": row,
                     "candidate_id": candidate_idx,
                     "prompt": prompt,
+                    "prefilter_prompt": prefilter_prompt,
+                    "prefilter_prompt_tokens": prompt_tokens,
                 }
             )
             prompts.append(prompt)
@@ -182,12 +205,16 @@ def generate_teacher_candidates(
                 "teacher_model": cfg.api_model_name,
                 "prompt_style": cfg.prompt_style,
                 "prompt": job["prompt"],
+                "prefilter_prompt": job["prefilter_prompt"],
+                "prefilter_prompt_tokens": int(job["prefilter_prompt_tokens"]),
                 "raw_output": raw_output,
             }
         )
 
     metrics = {
         "num_examples": len(rows),
+        "num_retained_examples": num_retained_examples,
+        "num_drop_prompt_over_budget": num_drop_prompt_over_budget,
         "num_candidates": len(candidate_rows),
     }
     write_jsonl(out_path, candidate_rows)
@@ -196,26 +223,53 @@ def generate_teacher_candidates(
     return metrics
 
 
-def _derive_support_window_knowledge(row: Dict[str, Any]) -> str:
-    windows = [str(item.get("window_text") or "").strip() for item in list(row.get("supporting_sentences") or [])]
-    windows = [item for item in windows if item]
-    if windows:
-        return "\n\n".join(windows)
-    return str(row.get("knowledge") or "").strip()
+def _semantic_hard_fail(decision: Optional[str], validation_cfg: ValidationConfig) -> bool:
+    if not validation_cfg.semantic_drop_by_nli or decision is None:
+        return False
+    if validation_cfg.semantic_decision_source == "reject_aware":
+        return decision in {"no", "abstain"}
+    return decision == "no"
 
 
-def _coerce_confidence(
-    report: ValidationReport,
-    parse_ok: bool,
-    parsed_output: Any,
-) -> Tuple[str | None, Any]:
-    if not parse_ok or parsed_output is None:
-        return None, parsed_output
-    derived = derive_confidence_label(report)
-    if derived is None:
-        return None, parsed_output
-    updated = parsed_output.model_copy(update={"confidence": ConfidenceLevel(derived)})
-    return derived, updated
+def _build_empty_semantics_report() -> SemanticCheckReport:
+    return SemanticCheckReport(
+        ok=None,
+        supported=None,
+        answer_type_ok=None,
+        refusal_ok=None,
+        decision=None,
+        margin=None,
+        details={},
+        issues=[],
+    )
+
+
+def _refresh_selected_confidence(
+    *,
+    rows: List[Dict[str, Any]],
+    validation_cfg: ValidationConfig,
+    spec: ProtocolSpec,
+) -> None:
+    assign_quantile_confidence_labels(rows)
+    for row in rows:
+        validation_report = dict(row.get("validation_report") or {})
+        derived_confidence = validation_report.get("derived_confidence")
+        parsed_output = row.get("parsed_output")
+        if derived_confidence is None or not parsed_output:
+            continue
+        updated_output = validate_structured_payload(parsed_output).model_copy(
+            update={"confidence": ConfidenceLevel(derived_confidence)}
+        )
+        canonical_output = to_canonical_json(updated_output, spec=spec)
+        completion_tokens = count_text_tokens(canonical_output, validation_cfg.tokenizer_name)
+        completion_over_budget = completion_tokens > validation_cfg.max_completion_tokens
+
+        row["parsed_output"] = updated_output.model_dump(mode="json")
+        row["canonical_output"] = canonical_output
+        validation_report["derived_confidence"] = derived_confidence
+        validation_report["completion_tokens"] = completion_tokens
+        validation_report["completion_over_budget"] = completion_over_budget
+        row["validation_report"] = validation_report
 
 
 def validate_teacher_candidates(
@@ -230,25 +284,42 @@ def validate_teacher_candidates(
 ) -> Dict[str, Any]:
     """Validate teacher-generated structured outputs and optionally select the best candidate."""
 
+    if validation_cfg.semantic_decision_source not in {"full_binary", "reject_aware"}:
+        raise ValueError(f"Unsupported semantic_decision_source: {validation_cfg.semantic_decision_source}")
+
     rows = list(read_jsonl(in_path))
     structured_judge = StructuredAnswerJudge.from_defaults() if validation_cfg.enable_semantics else None
 
     annotated_rows: List[Dict[str, Any]] = []
     num_parse_ok = 0
-    num_overall_ok = 0
-    answerability_match_yes = 0
+    num_hard_pass = 0
+    num_answerability_match = 0
+    num_semantic_negative = 0
+    num_completion_over_budget = 0
 
     for row in rows:
         parse_result = parse_structured_output(str(row.get("raw_output") or ""), spec=spec)
         protocol_report = ProtocolCheckReport(ok=False, issues=["Parsing failed."])
         evidence_report = EvidenceCheckReport(ok=False, issues=["Parsing failed."])
+        support_evidence_report = EvidenceCheckReport(ok=True, issues=[])
         correctness_report: CorrectnessCheckReport | None = None
-        semantics_report = None
+        semantics_report = _build_empty_semantics_report()
         answerability_match = None
+        hard_fail_reasons: List[str] = list(parse_result.errors)
+        soft_metrics: Dict[str, float | bool | None] = {}
+        completion_tokens = None
+        completion_over_budget = False
+        parsed_payload = None
+        canonical_output = None
 
         if parse_result.ok and parse_result.parsed is not None:
             num_parse_ok += 1
             protocol_report = check_protocol_constraints(parse_result.parsed, spec=spec)
+            parsed_payload = parse_result.parsed.model_dump(mode="json")
+            canonical_output = to_canonical_json(parse_result.parsed, spec=spec)
+            completion_tokens = count_text_tokens(canonical_output, validation_cfg.tokenizer_name)
+            completion_over_budget = completion_tokens > validation_cfg.max_completion_tokens
+
             evidence_report = check_evidence_quotes(
                 output=parse_result.parsed,
                 knowledge=str(row.get("knowledge") or ""),
@@ -258,12 +329,13 @@ def validate_teacher_candidates(
                 output=parse_result.parsed,
                 supporting_sentences=list(row.get("supporting_sentences") or []),
             )
-            evidence_report.ok = bool(evidence_report.ok and support_evidence_report.ok)
-            evidence_report.issues.extend(support_evidence_report.issues)
+            evidence_report.supporting_fact_match_rate = support_evidence_report.supporting_fact_match_rate
+            evidence_report.outside_supporting_fact_count = support_evidence_report.outside_supporting_fact_count
+
             gold_answerability = str(row.get("answerability_label") or "").strip()
             if gold_answerability:
                 answerability_match = parse_result.parsed.answerability.value == gold_answerability
-                answerability_match_yes += int(answerability_match)
+                num_answerability_match += int(bool(answerability_match))
 
             if parse_result.parsed.answerability == Answerability.ANSWERABLE and str(row.get("reference_answer") or "").strip():
                 correctness_report = check_answer_correctness(
@@ -272,57 +344,75 @@ def validate_teacher_candidates(
                     cfg=correctness_cfg,
                 )
 
-            semantics_report = evaluate_structured_semantics(
-                question=str(row.get("question") or ""),
-                knowledge=str(row.get("knowledge") or ""),
-                output=parse_result.parsed,
-                judge=structured_judge,
-                support_window_knowledge=_derive_support_window_knowledge(row) if validation_cfg.use_support_window_knowledge else str(row.get("knowledge") or ""),
-            )
+            if validation_cfg.enable_semantics:
+                semantics_report = evaluate_structured_semantics(
+                    question=str(row.get("question") or ""),
+                    knowledge=str(row.get("knowledge") or ""),
+                    output=parse_result.parsed,
+                    judge=structured_judge,
+                    decision_source=validation_cfg.semantic_decision_source,
+                )
+                if semantics_report.decision == "no":
+                    num_semantic_negative += 1
 
-        issues = list(parse_result.errors)
-        issues.extend(protocol_report.issues)
-        issues.extend(evidence_report.issues)
+            soft_metrics = {
+                "semantic_margin": semantics_report.margin,
+                "supporting_fact_match_rate": evidence_report.supporting_fact_match_rate,
+                "outside_supporting_fact_count": float(evidence_report.outside_supporting_fact_count),
+                "correctness_token_f1": None if correctness_report is None else correctness_report.token_f1,
+                "evidence_count": float(protocol_report.evidence_count),
+            }
+
+            if not protocol_report.ok:
+                hard_fail_reasons.extend(protocol_report.issues)
+            if completion_over_budget:
+                num_completion_over_budget += 1
+                hard_fail_reasons.append(
+                    f"Canonical completion exceeds max_completion_tokens={validation_cfg.max_completion_tokens}."
+                )
+            if answerability_match is False:
+                hard_fail_reasons.append("Predicted answerability does not match the target label.")
+            if not evidence_report.ok:
+                hard_fail_reasons.extend(evidence_report.issues)
+            if correctness_report is not None and not correctness_report.ok:
+                hard_fail_reasons.extend(correctness_report.issues)
+            if _semantic_hard_fail(semantics_report.decision, validation_cfg):
+                hard_fail_reasons.extend(semantics_report.issues or ["Semantic verifier rejected the sample."])
+
+        issues = list(hard_fail_reasons)
+        issues.extend(support_evidence_report.issues if parse_result.ok and parse_result.parsed is not None else [])
         if correctness_report is not None:
-            issues.extend(correctness_report.issues)
-        if semantics_report is not None:
-            issues.extend(semantics_report.issues)
+            for issue in correctness_report.issues:
+                if issue not in issues:
+                    issues.append(issue)
+        for issue in semantics_report.issues:
+            if issue not in issues:
+                issues.append(issue)
 
-        overall_ok = bool(parse_result.ok and protocol_report.ok and evidence_report.ok)
-        if answerability_match is False:
-            overall_ok = False
-        if str(row.get("answerability_label") or "").strip() == "answerable" and correctness_report is not None:
-            overall_ok = bool(overall_ok and correctness_report.ok)
-        if semantics_report is not None and semantics_report.ok is False:
-            overall_ok = False
-
+        hard_pass = len(hard_fail_reasons) == 0
+        num_hard_pass += int(hard_pass)
         report = ValidationReport(
             parse_ok=parse_result.ok,
-            overall_ok=overall_ok,
+            overall_ok=hard_pass,
+            hard_pass=hard_pass,
             protocol=protocol_report,
             evidence=evidence_report,
             correctness=correctness_report,
-            semantics=semantics_report,
+            semantics=semantics_report if validation_cfg.enable_semantics else None,
             answerability_match=answerability_match,
             derived_confidence=None,
             selection_score=0.0,
+            hard_fail_reasons=hard_fail_reasons,
+            soft_metrics=soft_metrics,
+            semantic_margin=semantics_report.margin if validation_cfg.enable_semantics else None,
+            semantic_decision_source=validation_cfg.semantic_decision_source if validation_cfg.enable_semantics else None,
+            semantic_filter_applied=bool(validation_cfg.enable_semantics and validation_cfg.semantic_drop_by_nli),
+            completion_tokens=completion_tokens,
+            completion_over_budget=completion_over_budget,
             issues=issues,
         )
-        derived_confidence, updated_output = _coerce_confidence(
-            report=report,
-            parse_ok=parse_result.ok,
-            parsed_output=parse_result.parsed,
-        )
-        report.derived_confidence = derived_confidence
-        report.selection_score = score_validation_report(report)
+        report.selection_score = score_validation_report(asdict(report))
 
-        canonical_output = None
-        parsed_payload = None
-        if updated_output is not None:
-            parsed_payload = updated_output.model_dump(mode="json")
-            canonical_output = to_canonical_json(updated_output, spec=spec)
-
-        num_overall_ok += int(overall_ok)
         annotated_rows.append(
             {
                 **row,
@@ -333,15 +423,21 @@ def validate_teacher_candidates(
             }
         )
 
+    selected_rows = select_best_candidates(annotated_rows)
+    _refresh_selected_confidence(rows=selected_rows, validation_cfg=validation_cfg, spec=spec)
+
     metrics = {
         "num_rows": len(rows),
         "num_parse_ok": num_parse_ok,
-        "num_overall_ok": num_overall_ok,
-        "num_answerability_match": answerability_match_yes,
+        "num_hard_pass": num_hard_pass,
+        "num_answerability_match": num_answerability_match,
+        "num_semantic_negative": num_semantic_negative,
+        "num_completion_over_budget": num_completion_over_budget,
+        "num_selected": len(selected_rows),
     }
     write_jsonl(out_path, annotated_rows)
     if selected_out_path:
-        write_jsonl(selected_out_path, select_best_candidates(annotated_rows))
+        write_jsonl(selected_out_path, selected_rows)
     if metrics_out:
         write_json(metrics_out, metrics)
     return metrics

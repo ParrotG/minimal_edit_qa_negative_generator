@@ -10,12 +10,10 @@ class ProtocolSpec:
 
     version: str = "grounded-qa-v1"
     max_evidence_count: int = 4
-    min_quote_chars: int = 8
-    max_quote_chars: int = 220
-    min_rationale_chars: int = 8
-    max_rationale_chars: int = 320
-    max_answer_chars: int = 256
-    max_total_chars: int = 4000
+    validation_tokenizer_name: str = "Qwen/Qwen3-0.6B"
+    max_completion_tokens: int = 512
+    prefilter_tokenizer_name: str = "Qwen/Qwen3-0.6B"
+    max_prompt_tokens: int = 512
     canonical_refusal: str = "I don't know based on the provided knowledge."
     refusal_templates: Tuple[str, ...] = (
         "I don't know based on the provided knowledge.",

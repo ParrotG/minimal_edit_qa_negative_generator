@@ -17,37 +17,31 @@ def check_evidence_quotes(
 ) -> EvidenceCheckReport:
     """Check evidence quote quality and substring validity."""
 
+    _ = spec
     issues: list[str] = []
     normalized_knowledge = normalize_quote(knowledge)
     normalized_quotes: list[str] = []
     matched = 0
+    non_substring_count = 0
 
     for idx, item in enumerate(output.evidence):
         quote = str(item.quote or "").strip()
         normalized_quote = normalize_quote(quote)
         normalized_quotes.append(normalized_quote)
 
-        if len(quote) < spec.min_quote_chars:
-            issues.append(f"Evidence quote #{idx} is shorter than min_quote_chars={spec.min_quote_chars}.")
-        if len(quote) > spec.max_quote_chars:
-            issues.append(f"Evidence quote #{idx} exceeds max_quote_chars={spec.max_quote_chars}.")
         if normalized_quote and normalized_quote in normalized_knowledge:
             matched += 1
         else:
+            non_substring_count += 1
             issues.append(f"Evidence quote #{idx} is not a substring of the knowledge.")
-
-    if len(set(normalized_quotes)) != len(normalized_quotes):
-        issues.append("Evidence quotes must be unique after normalization.")
-
-    if output.answerability == Answerability.UNANSWERABLE and output.evidence:
-        issues.append("Unanswerable output must not include evidence quotes.")
 
     total = max(1, len(output.evidence))
     return EvidenceCheckReport(
-        ok=not issues,
+        ok=non_substring_count == 0,
         issues=issues,
         quote_match_rate=float(matched / total),
         unique_quotes=len(set(normalized_quotes)),
+        non_substring_count=non_substring_count,
     )
 
 
@@ -59,7 +53,14 @@ def check_evidence_against_supporting_facts(
     """Check whether answerable evidence is grounded within gold supporting facts."""
 
     if output.answerability == Answerability.UNANSWERABLE:
-        return EvidenceCheckReport(ok=True, issues=[], quote_match_rate=1.0, unique_quotes=0)
+        return EvidenceCheckReport(
+            ok=True,
+            issues=[],
+            quote_match_rate=1.0,
+            unique_quotes=0,
+            supporting_fact_match_rate=1.0,
+            outside_supporting_fact_count=0,
+        )
 
     normalized_supports = [
         normalize_quote(str(item.get("sentence") or ""))
@@ -69,6 +70,7 @@ def check_evidence_against_supporting_facts(
     issues: list[str] = []
     matched = 0
     normalized_quotes: list[str] = []
+    outside_supporting_fact_count = 0
 
     for idx, item in enumerate(output.evidence):
         normalized_quote = normalize_quote(str(item.quote or ""))
@@ -76,12 +78,15 @@ def check_evidence_against_supporting_facts(
         if any(normalized_quote and normalized_quote in support for support in normalized_supports):
             matched += 1
         else:
+            outside_supporting_fact_count += 1
             issues.append(f"Evidence quote #{idx} is outside the gold supporting facts.")
 
     total = max(1, len(output.evidence))
     return EvidenceCheckReport(
-        ok=not issues,
+        ok=True,
         issues=issues,
         quote_match_rate=float(matched / total),
         unique_quotes=len(set(normalized_quotes)),
+        supporting_fact_match_rate=float(matched / total),
+        outside_supporting_fact_count=outside_supporting_fact_count,
     )

@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List
 
-import orjson
+try:
+    import orjson
+except ImportError:  # pragma: no cover - lightweight fallback for test environments.
+    orjson = None
 
 
 def read_jsonl(path: str | Path) -> Iterator[Dict[str, Any]]:
@@ -16,7 +19,10 @@ def read_jsonl(path: str | Path) -> Iterator[Dict[str, Any]]:
             line = line.strip()
             if not line:
                 continue
-            yield orjson.loads(line)
+            if orjson is not None:
+                yield orjson.loads(line)
+            else:
+                yield json.loads(line.decode("utf-8"))
 
 
 def read_jsonl_list(path: str | Path) -> List[Dict[str, Any]]:
@@ -32,7 +38,11 @@ def write_jsonl(path: str | Path, records: Iterable[Dict[str, Any]]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("wb") as f:
         for record in records:
-            f.write(orjson.dumps(record))
+            if orjson is not None:
+                payload = orjson.dumps(record)
+            else:
+                payload = json.dumps(record, ensure_ascii=False).encode("utf-8")
+            f.write(payload)
             f.write(b"\n")
 
 

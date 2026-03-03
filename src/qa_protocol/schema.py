@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:  # pragma: no cover - Python < 3.11 compatibility for tests.
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        pass
 
 from pydantic import BaseModel, ConfigDict, Field
 

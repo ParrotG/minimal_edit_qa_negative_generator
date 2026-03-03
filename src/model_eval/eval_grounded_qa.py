@@ -141,7 +141,6 @@ def main() -> None:
                 knowledge=str(row.get("knowledge") or ""),
                 output=output,
                 judge=structured_judge,
-                support_window_knowledge=str(row.get("knowledge") or ""),
             )
 
             protocol_ok += int(protocol_report.ok)

@@ -14,7 +14,7 @@ def evaluate_structured_semantics(
     knowledge: str,
     output: StructuredQaOutput,
     judge: Optional[StructuredAnswerJudge],
-    support_window_knowledge: Optional[str] = None,
+    decision_source: str = "full_binary",
 ) -> SemanticCheckReport:
     """Evaluate semantic support for one structured output."""
 
@@ -24,6 +24,8 @@ def evaluate_structured_semantics(
             supported=None,
             answer_type_ok=None,
             refusal_ok=None,
+            decision=None,
+            margin=None,
             details={},
             issues=[],
         )
@@ -33,19 +35,21 @@ def evaluate_structured_semantics(
             {
                 "question": question,
                 "knowledge": knowledge,
-                "support_window_knowledge": support_window_knowledge or knowledge,
                 "parsed_output": output.model_dump(mode="json"),
             }
-        ]
+        ],
+        decision_source=decision_source,
     )
     payload = judged_rows[0].get("structured_judge") or {}
     answer_judge = payload.get("answer_judge") or {}
     issues = list(payload.get("issues") or [])
     return SemanticCheckReport(
         ok=payload.get("ok"),
-        supported=answer_judge.get("is_correct"),
+        supported=payload.get("supported"),
         answer_type_ok=answer_judge.get("qa_consistent"),
         refusal_ok=payload.get("refusal_ok"),
+        decision=payload.get("decision"),
+        margin=payload.get("margin"),
         details=payload,
         issues=issues,
     )

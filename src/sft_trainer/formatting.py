@@ -27,6 +27,17 @@ def build_sft_record(row: Dict[str, Any], prompt_style: str) -> Optional[Dict[st
         return None
 
     structured_payload, canonical_output = structured_pair
+    answerability = str(structured_payload.get("answerability") or "").strip()
+    confidence = str(structured_payload.get("confidence") or "").strip()
+    validation_report = dict(row.get("validation_report") or {})
+    derived_confidence = str(validation_report.get("derived_confidence") or "").strip()
+    if answerability == "answerable" and not derived_confidence:
+        return None
+    if answerability == "answerable":
+        structured_payload["confidence"] = derived_confidence
+        canonical_output = to_canonical_json(validate_structured_payload(structured_payload))
+    if answerability == "unanswerable" and not confidence:
+        return None
     if prompt_style != "infer_v1":
         raise ValueError(f"Unsupported SFT prompt style: {prompt_style}")
 
@@ -47,6 +58,6 @@ def build_sft_record(row: Dict[str, Any], prompt_style: str) -> Optional[Dict[st
             "reference_answer": str(row.get("reference_answer") or "").strip(),
             "answerability_label": str(row.get("answerability_label") or "").strip(),
             "difficulty": str(row.get("difficulty") or "").strip(),
-            "validation_report": dict(row.get("validation_report") or {}),
+            "validation_report": validation_report,
         },
     }
