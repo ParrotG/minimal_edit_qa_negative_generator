@@ -36,7 +36,7 @@
 协议约束：
 - **unanswerable 规则**：当 `answerability = unanswerable` 时
   - `evidence` 必须为空数组 `[]`
-  - `rationale` 必须简要说明知识不足，且不能与 `answer` 完全相同
+  - `rationale` 必须简要说明知识中缺失、歧义或矛盾的信息，且不能与 `answer` 完全相同
   - `answer` 必须是拒答模板集合之一
 - **answerable 规则**：当 `answerability = answerable` 时
   - `evidence` 至少 1 条，最多 K 条（默认 K=3）
@@ -65,6 +65,10 @@ v1 先固定为小集合，便于训练与验证：
 - 数据生成阶段：用 `schema1` 通过 API 调用强模型生成合规回答
 - 训练阶段：用 `schema2 + 合规回答` 训练小模型
 - 生成阶段：用 `schema2` 启动推理
+
+其中：
+- 当问题可回答时，`rationale` 仍要求仅通过 `evidence` 做最小必要推理得到答案。
+- 当问题不可回答时，`rationale` 应指出关键信息缺失、歧义或矛盾，而不是只输出模板拒答。
 
 可选地按小比例混入 `schema1` 训练样本，用于 prompt 分布锚定，但不是首要目标。
 
@@ -144,11 +148,20 @@ supporting_facts["sent_id"]: 支持句在该段落中的句子序号（从 0 开
 
 #### unanswerable 样本
 
-从可回答样本派生，目标是“信息不足但表面相关”，而不是“明显无关”：
-- 删除至少一个关键 supporting hop
-- 保留剩余 supporting sentence，必要时保留其邻近句
-- 可补入少量表面相关句子，但仍以短 knowledge 为原则
-- 构造后执行 `max_token` 检查，只保留在限额内的样本
+`unanswerable` 走独立工作流，不再只依赖简单 support-drop：
+- 一半输入来自已选 `answerable` 样本的同源派生
+- 另一半输入来自同 split 的剩余 Hotpot raw 池
+- 两类来源都先按 `answerable` 相同参数构造 supporting scaffold
+- 再将 1 条或多条关键 supporting fact 替换为：
+  - 同文档邻句
+  - 同文档非-support 句
+  - 临近文档句
+- 基本思想是：排除支持句，但让 knowledge 长度和表面分布保持接近
+
+在 teacher 生成前，还需增加一层 NLI 先验判负：
+- 将 `knowledge + question + "The answer is {reference_answer}."` 输入 NLI 判定器
+- 仅保留 `full_binary = no` 的样本
+- 这样可以剔除“虽然替换了 support，但原答案仍然可推出”的伪负例
 
 ### 数据切分
 
@@ -177,12 +190,21 @@ supporting_facts["sent_id"]: 支持句在该段落中的句子序号（从 0 开
 - 该阶段必须支持断点续跑、续生成、替换指定样本
 - 实践中先做小规模试验，选择合适的 API 模型
 
+补充：
+- `answerable` 样本可提供 `reference_answer`
+- `unanswerable` 样本不提供 `reference_answer`
+- `unanswerable` 也走 teacher 生成，以补齐符合协议的 `rationale`
+
 ### Step B：自动过滤（强制 + 分流）
 
 - 共用 protocol / quote / 长度检查
 - 分流 `answerable` 与 `unanswerable`
 - `answerable` 样本不应拒答，需通过引用与语义检查
 - `unanswerable` 样本需以符合规范的形式拒答
+- `unanswerable` validate 使用独立管线：
+  - 做 canonicalization、parse、protocol、answerability 一致性、completion token budget
+  - 不做 evidence / correctness / semantic 检查
+  - v1 暂不做软排序，选择首个 hard-pass 候选
 
 ### Step C：人工复核
 
@@ -200,6 +222,10 @@ supporting_facts["sent_id"]: 支持句在该段落中的句子序号（从 0 开
 用上一步生成的数据执行 SFT：
 - 按固定 step 保存 checkpoint，便于后续测评曲线
 - 可选地进行难度递增采样，但首版不是必须项
+
+confidence 处理规则：
+- `answerable` completion 的 `confidence` 在入训前由 `derived_confidence` 覆盖
+- `unanswerable` completion 的 `confidence` v1 暂保留 teacher 原值
 
 * * *
 

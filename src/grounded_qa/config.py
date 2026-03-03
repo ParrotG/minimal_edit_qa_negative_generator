@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from llm_textgen.api_client import ApiGenerationConfig
+from qa_judge.config import JudgeConfig, NLIConfig
 
 
 @dataclass(frozen=True)
@@ -49,12 +50,43 @@ class ValidationConfig:
     """Validation defaults for teacher candidates."""
 
     enable_semantics: bool = True
-    semantic_drop_by_nli: bool = True
+    semantic_drop_by_nli: bool = False
     semantic_decision_source: str = "full_binary"
     tokenizer_name: str = "Qwen/Qwen3-0.6B"
     max_completion_tokens: int = 512
     prefilter_tokenizer_name: str = "Qwen/Qwen3-0.6B"
     max_prompt_tokens: int = 512
+
+
+@dataclass(frozen=True)
+class UnanswerablePipelineConfig:
+    """Configuration for v1 unanswerable raw construction."""
+
+    target_split: str = "train_sft_raw"
+    paired_fraction: float = 0.5
+    max_total_examples: int = -1
+    replace_supporting_facts_min: int = 1
+    replace_supporting_facts_max: int = 1
+    same_doc_candidate_radius: int = 1
+    allow_same_doc_non_adjacent: bool = True
+    adjacent_doc_sentence_limit: int = 1
+    include_title_prefix: bool = True
+    seed: int = 42
+
+
+@dataclass(frozen=True)
+class UnanswerablePrefilterConfig:
+    """Configuration for the unanswerable NLI prefilter."""
+
+    enable_nli_prefilter: bool = True
+    judge_decision_source: str = "full_binary"
+    nli_model_name: str = NLIConfig.model_name
+    nli_device: str = NLIConfig.device
+    nli_batch_size: int = NLIConfig.batch_size
+    nli_max_length: int = NLIConfig.max_length
+    nli_fp16: bool = NLIConfig.fp16
+    temperature: float = JudgeConfig.temperature
+    full_margin_threshold: float = JudgeConfig.full_margin_threshold
 
 
 @dataclass(frozen=True)

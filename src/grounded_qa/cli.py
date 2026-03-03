@@ -9,14 +9,24 @@ from rich.console import Console
 from qa_checks.correctness import CorrectnessConfig
 from qa_data import ConstructionConfig, HotpotSourceConfig, NegativeSamplingConfig, SplitConfig
 
-from .config import SftRecordConfig, TeacherGenerationConfig, ValidationConfig
+from .config import (
+    SftRecordConfig,
+    TeacherGenerationConfig,
+    UnanswerablePipelineConfig,
+    UnanswerablePrefilterConfig,
+    ValidationConfig,
+)
 from .workflow import (
     build_hotpot_source,
     build_sft_records,
     build_simple_negatives,
+    build_unanswerable_source,
+    export_split_hotpot_rows,
     generate_teacher_candidates,
+    prefilter_unanswerable_source,
     split_examples,
     validate_teacher_candidates,
+    validate_unanswerable_teacher_candidates,
 )
 
 
@@ -79,7 +89,7 @@ def source_negatives(
     max_adjacent_doc_sentences: int = typer.Option(NegativeSamplingConfig.max_adjacent_doc_sentences, help="Number of adjacent-document distractor sentences."),
     metrics_out: Optional[str] = typer.Option(None, help="Optional metrics JSON path."),
 ) -> None:
-    """Derive simple first-pass unanswerable examples."""
+    """Derive legacy simple unanswerable examples."""
 
     metrics = build_simple_negatives(
         in_path=in_path,
@@ -92,6 +102,126 @@ def source_negatives(
         ),
     )
     console.print(f"Saved simple negatives to {out}")
+    console.print_json(json.dumps(metrics))
+
+
+@source_app.command("hotpot-raw")
+def source_hotpot_raw(
+    out: str = typer.Option(..., help="Output split-assigned raw Hotpot JSONL path."),
+    split: str = typer.Option(HotpotSourceConfig.split, help="HotpotQA split."),
+    dataset_name: str = typer.Option(HotpotSourceConfig.dataset_name, help="HotpotQA dataset name."),
+    max_samples: int = typer.Option(HotpotSourceConfig.max_samples, help="Maximum source rows to load. -1 keeps all."),
+    seed: int = typer.Option(HotpotSourceConfig.seed, help="Random seed."),
+    validation_ratio: float = typer.Option(SplitConfig.validation_ratio, help="Validation split ratio."),
+    test_ratio: float = typer.Option(SplitConfig.test_ratio, help="Test split ratio."),
+    train_sft_ratio: float = typer.Option(SplitConfig.train_sft_ratio, help="Train-SFT split ratio."),
+    train_dpo_ratio: float = typer.Option(SplitConfig.train_dpo_ratio, help="Train-DPO split ratio."),
+    metrics_out: Optional[str] = typer.Option(None, help="Optional metrics JSON path."),
+) -> None:
+    """Export raw Hotpot rows with stable split assignments."""
+
+    metrics = export_split_hotpot_rows(
+        out_path=out,
+        metrics_out=metrics_out,
+        source_cfg=HotpotSourceConfig(
+            dataset_name=dataset_name,
+            split=split,
+            max_samples=max_samples,
+            seed=seed,
+        ),
+        split_cfg=SplitConfig(
+            validation_ratio=validation_ratio,
+            test_ratio=test_ratio,
+            train_sft_ratio=train_sft_ratio,
+            train_dpo_ratio=train_dpo_ratio,
+        ),
+    )
+    console.print(f"Saved split-assigned raw Hotpot rows to {out}")
+    console.print_json(json.dumps(metrics))
+
+
+@source_app.command("unanswerable")
+def source_unanswerable(
+    paired_answerable_path: str = typer.Option(..., help="Input answerable raw JSONL path."),
+    raw_hotpot_pool_path: str = typer.Option(..., help="Input split-assigned raw Hotpot JSONL path."),
+    out: str = typer.Option(..., help="Output unanswerable raw JSONL path."),
+    target_split: str = typer.Option(UnanswerablePipelineConfig.target_split, help="Target split to sample from."),
+    paired_fraction: float = typer.Option(UnanswerablePipelineConfig.paired_fraction, help="Approximate paired-source fraction."),
+    max_total_examples: int = typer.Option(UnanswerablePipelineConfig.max_total_examples, help="Approximate total output count. -1 keeps all paired and matches external count."),
+    replace_supporting_facts_min: int = typer.Option(UnanswerablePipelineConfig.replace_supporting_facts_min, help="Minimum number of supporting facts to replace."),
+    replace_supporting_facts_max: int = typer.Option(UnanswerablePipelineConfig.replace_supporting_facts_max, help="Maximum number of supporting facts to replace."),
+    same_doc_candidate_radius: int = typer.Option(UnanswerablePipelineConfig.same_doc_candidate_radius, help="Same-document neighbor radius for replacement sentences."),
+    allow_same_doc_non_adjacent: bool = typer.Option(UnanswerablePipelineConfig.allow_same_doc_non_adjacent, help="Allow fallback to same-document non-adjacent sentences."),
+    adjacent_doc_sentence_limit: int = typer.Option(UnanswerablePipelineConfig.adjacent_doc_sentence_limit, help="Maximum number of sentences to consider from adjacent documents."),
+    window_size: int = typer.Option(ConstructionConfig.window_size, help="Support window size used when external raw rows are scaffolded into answerable examples."),
+    max_supporting_facts: int = typer.Option(ConstructionConfig.max_supporting_facts, help="Maximum supporting facts when scaffold-building external raw rows."),
+    include_title_prefix: bool = typer.Option(UnanswerablePipelineConfig.include_title_prefix, help="Whether to prefix replacement blocks with document titles."),
+    seed: int = typer.Option(UnanswerablePipelineConfig.seed, help="Random seed."),
+    metrics_out: Optional[str] = typer.Option(None, help="Optional metrics JSON path."),
+) -> None:
+    """Build v1 unanswerable raw examples from paired and external pools."""
+
+    metrics = build_unanswerable_source(
+        paired_answerable_path=paired_answerable_path,
+        raw_hotpot_pool_path=raw_hotpot_pool_path,
+        out_path=out,
+        metrics_out=metrics_out,
+        pipeline_cfg=UnanswerablePipelineConfig(
+            target_split=target_split,
+            paired_fraction=paired_fraction,
+            max_total_examples=max_total_examples,
+            replace_supporting_facts_min=replace_supporting_facts_min,
+            replace_supporting_facts_max=replace_supporting_facts_max,
+            same_doc_candidate_radius=same_doc_candidate_radius,
+            allow_same_doc_non_adjacent=allow_same_doc_non_adjacent,
+            adjacent_doc_sentence_limit=adjacent_doc_sentence_limit,
+            include_title_prefix=include_title_prefix,
+            seed=seed,
+        ),
+        construct_cfg=ConstructionConfig(
+            window_size=window_size,
+            max_supporting_facts=max_supporting_facts,
+            include_title_prefix=include_title_prefix,
+        ),
+    )
+    console.print(f"Saved v1 unanswerable raw rows to {out}")
+    console.print_json(json.dumps(metrics))
+
+
+@source_app.command("unanswerable-prefilter")
+def source_unanswerable_prefilter(
+    in_path: str = typer.Option(..., help="Input unanswerable raw JSONL path."),
+    out: str = typer.Option(..., help="Output NLI-prefiltered unanswerable raw JSONL path."),
+    enable_nli_prefilter: bool = typer.Option(UnanswerablePrefilterConfig.enable_nli_prefilter, help="Enable the unanswerable NLI prefilter."),
+    judge_decision_source: str = typer.Option(UnanswerablePrefilterConfig.judge_decision_source, help="Decision source used for prefiltering. Only full_binary is supported."),
+    nli_model_name: str = typer.Option(UnanswerablePrefilterConfig.nli_model_name, help="NLI model name."),
+    nli_device: str = typer.Option(UnanswerablePrefilterConfig.nli_device, help="NLI device."),
+    nli_batch_size: int = typer.Option(UnanswerablePrefilterConfig.nli_batch_size, help="NLI batch size."),
+    nli_max_length: int = typer.Option(UnanswerablePrefilterConfig.nli_max_length, help="NLI max length."),
+    nli_fp16: bool = typer.Option(UnanswerablePrefilterConfig.nli_fp16, help="Whether to use fp16 for the NLI verifier."),
+    temperature: float = typer.Option(UnanswerablePrefilterConfig.temperature, help="Temperature used by the calibrated NLI judge."),
+    full_margin_threshold: float = typer.Option(UnanswerablePrefilterConfig.full_margin_threshold, help="Full-binary margin threshold."),
+    metrics_out: Optional[str] = typer.Option(None, help="Optional metrics JSON path."),
+) -> None:
+    """Prefilter unanswerable raw rows using NLI against the original reference answer."""
+
+    metrics = prefilter_unanswerable_source(
+        in_path=in_path,
+        out_path=out,
+        metrics_out=metrics_out,
+        cfg=UnanswerablePrefilterConfig(
+            enable_nli_prefilter=enable_nli_prefilter,
+            judge_decision_source=judge_decision_source,
+            nli_model_name=nli_model_name,
+            nli_device=nli_device,
+            nli_batch_size=nli_batch_size,
+            nli_max_length=nli_max_length,
+            nli_fp16=nli_fp16,
+            temperature=temperature,
+            full_margin_threshold=full_margin_threshold,
+        ),
+    )
+    console.print(f"Saved NLI-prefiltered unanswerable rows to {out}")
     console.print_json(json.dumps(metrics))
 
 
@@ -207,6 +337,36 @@ def teacher_validate(
     console.print(f"Saved validated candidates to {out}")
     if selected_out:
         console.print(f"Saved selected candidates to {selected_out}")
+    console.print_json(json.dumps(metrics))
+
+
+@teacher_app.command("validate-unanswerable")
+def teacher_validate_unanswerable(
+    in_path: str = typer.Option(..., help="Input unanswerable teacher candidate JSONL path."),
+    out: str = typer.Option(..., help="Output validated unanswerable candidate JSONL path."),
+    selected_out: Optional[str] = typer.Option(None, help="Optional output path for one selected candidate per example."),
+    tokenizer_name: str = typer.Option(ValidationConfig.tokenizer_name, help="Tokenizer name used for completion length checks."),
+    max_completion_tokens: int = typer.Option(ValidationConfig.max_completion_tokens, help="Maximum canonical completion tokens."),
+    metrics_out: Optional[str] = typer.Option(None, help="Optional metrics JSON path."),
+) -> None:
+    """Parse and validate unanswerable teacher candidates with unanswerable-specific rules."""
+
+    metrics = validate_unanswerable_teacher_candidates(
+        in_path=in_path,
+        out_path=out,
+        selected_out_path=selected_out,
+        metrics_out=metrics_out,
+        validation_cfg=ValidationConfig(
+            enable_semantics=False,
+            semantic_drop_by_nli=False,
+            semantic_decision_source="full_binary",
+            tokenizer_name=tokenizer_name,
+            max_completion_tokens=max_completion_tokens,
+        ),
+    )
+    console.print(f"Saved validated unanswerable candidates to {out}")
+    if selected_out:
+        console.print(f"Saved selected unanswerable candidates to {selected_out}")
     console.print_json(json.dumps(metrics))
 
 

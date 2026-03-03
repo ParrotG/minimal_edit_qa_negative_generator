@@ -12,8 +12,10 @@ from qa_checks import (
     check_evidence_against_supporting_facts,
     check_evidence_quotes,
     check_protocol_constraints,
+    check_reference_answer_unsupported,
     evaluate_structured_semantics,
     score_validation_report,
+    select_first_valid_unanswerable_candidate,
     select_best_candidates,
 )
 from qa_checks.report import CorrectnessCheckReport, EvidenceCheckReport, ProtocolCheckReport, SemanticCheckReport, ValidationReport
@@ -23,13 +25,19 @@ from qa_data import (
     HotpotSourceConfig,
     NegativeSamplingConfig,
     SplitConfig,
+    UnanswerableBuildConfig,
     assign_split,
+    build_unanswerable_examples_from_pools,
     build_answerable_example,
     derive_simple_unanswerable,
     example_from_dict,
     example_to_dict,
     iter_hotpot_rows,
+    iter_split_hotpot_rows,
 )
+from qa_judge.config import JudgeConfig, NLIConfig
+from qa_judge.judge import AnswerJudge
+from qa_judge.nli import NLIVerifier
 from qa_judge.structured import StructuredAnswerJudge
 from qa_protocol import (
     Answerability,
@@ -45,7 +53,7 @@ from qa_protocol import (
 from qa_protocol.spec import ProtocolSpec
 from sft_trainer.formatting import build_sft_record
 
-from .config import TeacherGenerationConfig, ValidationConfig
+from .config import TeacherGenerationConfig, UnanswerablePipelineConfig, UnanswerablePrefilterConfig, ValidationConfig
 
 
 def build_hotpot_source(
@@ -73,6 +81,31 @@ def build_hotpot_source(
         "num_input": num_input,
         "num_kept": num_kept,
         "num_dropped": num_input - num_kept,
+    }
+    write_jsonl(out_path, rows)
+    if metrics_out:
+        write_json(metrics_out, metrics)
+    return metrics
+
+
+def export_split_hotpot_rows(
+    *,
+    out_path: str,
+    metrics_out: Optional[str],
+    source_cfg: HotpotSourceConfig,
+    split_cfg: SplitConfig,
+) -> Dict[str, Any]:
+    """Export raw Hotpot rows with stable split assignments."""
+
+    rows = list(iter_split_hotpot_rows(source_cfg, split_cfg))
+    split_counts: Dict[str, int] = {}
+    for row in rows:
+        split_name = str(row.get("split") or "").strip()
+        split_counts[split_name] = split_counts.get(split_name, 0) + 1
+
+    metrics: Dict[str, Any] = {
+        "num_rows": len(rows),
+        "split_counts": split_counts,
     }
     write_jsonl(out_path, rows)
     if metrics_out:
@@ -135,6 +168,153 @@ def split_examples(
         "split_counts": split_counts,
     }
     write_jsonl(out_path, out_rows)
+    if metrics_out:
+        write_json(metrics_out, metrics)
+    return metrics
+
+
+def build_unanswerable_source(
+    *,
+    paired_answerable_path: str,
+    raw_hotpot_pool_path: str,
+    out_path: str,
+    metrics_out: Optional[str],
+    pipeline_cfg: UnanswerablePipelineConfig,
+    construct_cfg: ConstructionConfig,
+) -> Dict[str, Any]:
+    """Build v1 unanswerable raw examples from paired and external pools."""
+
+    paired_examples = [example_from_dict(dict(row)) for row in read_jsonl(paired_answerable_path)]
+    raw_hotpot_rows = [dict(row) for row in read_jsonl(raw_hotpot_pool_path)]
+    build_cfg = UnanswerableBuildConfig(
+        paired_fraction=pipeline_cfg.paired_fraction,
+        max_total_examples=pipeline_cfg.max_total_examples,
+        replace_supporting_facts_min=pipeline_cfg.replace_supporting_facts_min,
+        replace_supporting_facts_max=pipeline_cfg.replace_supporting_facts_max,
+        same_doc_candidate_radius=pipeline_cfg.same_doc_candidate_radius,
+        allow_same_doc_non_adjacent=pipeline_cfg.allow_same_doc_non_adjacent,
+        adjacent_doc_sentence_limit=pipeline_cfg.adjacent_doc_sentence_limit,
+        include_title_prefix=pipeline_cfg.include_title_prefix,
+        seed=pipeline_cfg.seed,
+    )
+
+    built_examples = build_unanswerable_examples_from_pools(
+        paired_examples=paired_examples,
+        raw_hotpot_rows=raw_hotpot_rows,
+        target_split=pipeline_cfg.target_split,
+        construct_cfg=construct_cfg,
+        cfg=build_cfg,
+    )
+    rows = [example_to_dict(example) for example in built_examples]
+
+    origin_counts: Dict[str, int] = {}
+    for row in rows:
+        origin = str(((row.get("metadata") or {}).get("origin_track")) or "")
+        origin_counts[origin] = origin_counts.get(origin, 0) + 1
+
+    metrics: Dict[str, Any] = {
+        "num_paired_input": sum(1 for example in paired_examples if str(example.split or "") == pipeline_cfg.target_split),
+        "num_external_input": sum(1 for row in raw_hotpot_rows if str(row.get("split") or "") == pipeline_cfg.target_split),
+        "num_paired_selected": origin_counts.get("paired_answerable", 0),
+        "num_external_selected": origin_counts.get("external_raw", 0),
+        "num_kept": len(rows),
+        "origin_counts": origin_counts,
+        "target_split": pipeline_cfg.target_split,
+    }
+    write_jsonl(out_path, rows)
+    if metrics_out:
+        write_json(metrics_out, metrics)
+    return metrics
+
+
+def _build_unanswerable_prefilter_judge(cfg: UnanswerablePrefilterConfig) -> AnswerJudge:
+    verifier = NLIVerifier(
+        model_name=cfg.nli_model_name,
+        device=cfg.nli_device,
+        batch_size=cfg.nli_batch_size,
+        max_length=cfg.nli_max_length,
+        fp16=cfg.nli_fp16,
+    )
+    judge_cfg = JudgeConfig(
+        temperature=cfg.temperature,
+        full_margin_threshold=cfg.full_margin_threshold,
+        reject_margin_threshold=cfg.full_margin_threshold,
+        reject_band_half_width=0.0,
+        qa_fail_as_negative=False,
+        qa_check_answer_type=False,
+        qa_spacy_model=JudgeConfig.qa_spacy_model,
+    )
+    return AnswerJudge(cfg=judge_cfg, verifier=verifier)
+
+
+def prefilter_unanswerable_source(
+    *,
+    in_path: str,
+    out_path: str,
+    metrics_out: Optional[str],
+    cfg: UnanswerablePrefilterConfig,
+) -> Dict[str, Any]:
+    """Keep only raw unanswerable samples whose original answer is no longer supported."""
+
+    rows = [dict(row) for row in read_jsonl(in_path)]
+    if not cfg.enable_nli_prefilter:
+        write_jsonl(out_path, rows)
+        metrics = {
+            "num_input": len(rows),
+            "num_kept": len(rows),
+            "num_dropped": 0,
+            "num_full_binary_no": 0,
+            "num_full_binary_yes": 0,
+            "mean_margin_kept": 0.0,
+        }
+        if metrics_out:
+            write_json(metrics_out, metrics)
+        return metrics
+
+    if cfg.judge_decision_source != "full_binary":
+        raise ValueError(f"Unsupported judge_decision_source: {cfg.judge_decision_source}")
+
+    judge = _build_unanswerable_prefilter_judge(cfg)
+    kept_rows: List[Dict[str, Any]] = []
+    num_no = 0
+    num_yes = 0
+    kept_margins: List[float] = []
+
+    for row in rows:
+        report = check_reference_answer_unsupported(
+            knowledge=str(row.get("knowledge") or "").strip(),
+            question=str(row.get("question") or "").strip(),
+            reference_answer=str(row.get("reference_answer") or "").strip(),
+            judge=judge,
+        )
+        metadata = dict(row.get("metadata") or {})
+        metadata["nli_prefilter"] = {
+            "keep": bool(report.keep),
+            "full_binary_decision": report.full_binary_decision,
+            "margin": report.margin,
+            "issues": list(report.issues),
+            "judge_payload": report.judge_payload,
+        }
+        row["metadata"] = metadata
+        if report.full_binary_decision == "no":
+            num_no += 1
+        else:
+            num_yes += 1
+        if report.keep:
+            kept_rows.append(row)
+            if report.margin is not None:
+                kept_margins.append(float(report.margin))
+
+    mean_margin_kept = float(sum(kept_margins) / len(kept_margins)) if kept_margins else 0.0
+    metrics = {
+        "num_input": len(rows),
+        "num_kept": len(kept_rows),
+        "num_dropped": len(rows) - len(kept_rows),
+        "num_full_binary_no": num_no,
+        "num_full_binary_yes": num_yes,
+        "mean_margin_kept": mean_margin_kept,
+    }
+    write_jsonl(out_path, kept_rows)
     if metrics_out:
         write_json(metrics_out, metrics)
     return metrics
@@ -432,6 +612,107 @@ def validate_teacher_candidates(
         "num_hard_pass": num_hard_pass,
         "num_answerability_match": num_answerability_match,
         "num_semantic_negative": num_semantic_negative,
+        "num_completion_over_budget": num_completion_over_budget,
+        "num_selected": len(selected_rows),
+    }
+    write_jsonl(out_path, annotated_rows)
+    if selected_out_path:
+        write_jsonl(selected_out_path, selected_rows)
+    if metrics_out:
+        write_json(metrics_out, metrics)
+    return metrics
+
+
+def validate_unanswerable_teacher_candidates(
+    *,
+    in_path: str,
+    out_path: str,
+    selected_out_path: Optional[str],
+    metrics_out: Optional[str],
+    validation_cfg: ValidationConfig,
+    spec: ProtocolSpec = DEFAULT_PROTOCOL_SPEC,
+) -> Dict[str, Any]:
+    """Validate unanswerable teacher candidates with unanswerable-specific rules."""
+
+    rows = list(read_jsonl(in_path))
+    annotated_rows: List[Dict[str, Any]] = []
+    num_parse_ok = 0
+    num_hard_pass = 0
+    num_answerability_match = 0
+    num_completion_over_budget = 0
+
+    for row in rows:
+        parse_result = parse_structured_output(str(row.get("raw_output") or ""), spec=spec)
+        protocol_report = ProtocolCheckReport(ok=False, issues=["Parsing failed."])
+        evidence_report = EvidenceCheckReport(ok=True, issues=[])
+        answerability_match = None
+        hard_fail_reasons: List[str] = list(parse_result.errors)
+        completion_tokens = None
+        completion_over_budget = False
+        parsed_payload = None
+        canonical_output = None
+
+        if parse_result.ok and parse_result.parsed is not None:
+            num_parse_ok += 1
+            protocol_report = check_protocol_constraints(parse_result.parsed, spec=spec)
+            parsed_payload = parse_result.parsed.model_dump(mode="json")
+            canonical_output = to_canonical_json(parse_result.parsed, spec=spec)
+            completion_tokens = count_text_tokens(canonical_output, validation_cfg.tokenizer_name)
+            completion_over_budget = completion_tokens > validation_cfg.max_completion_tokens
+
+            gold_answerability = str(row.get("answerability_label") or "").strip()
+            if gold_answerability:
+                answerability_match = parse_result.parsed.answerability.value == gold_answerability
+                num_answerability_match += int(bool(answerability_match))
+
+            if not protocol_report.ok:
+                hard_fail_reasons.extend(protocol_report.issues)
+            if answerability_match is False:
+                hard_fail_reasons.append("Predicted answerability does not match the target label.")
+            if completion_over_budget:
+                num_completion_over_budget += 1
+                hard_fail_reasons.append(
+                    f"Canonical completion exceeds max_completion_tokens={validation_cfg.max_completion_tokens}."
+                )
+
+        hard_pass = len(hard_fail_reasons) == 0
+        num_hard_pass += int(hard_pass)
+        report = ValidationReport(
+            parse_ok=parse_result.ok,
+            overall_ok=hard_pass,
+            hard_pass=hard_pass,
+            protocol=protocol_report,
+            evidence=evidence_report,
+            correctness=None,
+            semantics=None,
+            answerability_match=answerability_match,
+            derived_confidence=None,
+            selection_score=0.0,
+            hard_fail_reasons=hard_fail_reasons,
+            soft_metrics={},
+            semantic_margin=None,
+            semantic_decision_source=None,
+            semantic_filter_applied=False,
+            completion_tokens=completion_tokens,
+            completion_over_budget=completion_over_budget,
+            issues=list(hard_fail_reasons),
+        )
+        annotated_rows.append(
+            {
+                **row,
+                "parse_ok": bool(parse_result.ok),
+                "parsed_output": parsed_payload,
+                "canonical_output": canonical_output,
+                "validation_report": asdict(report),
+            }
+        )
+
+    selected_rows = select_first_valid_unanswerable_candidate(annotated_rows)
+    metrics = {
+        "num_rows": len(rows),
+        "num_parse_ok": num_parse_ok,
+        "num_hard_pass": num_hard_pass,
+        "num_answerability_match": num_answerability_match,
         "num_completion_over_budget": num_completion_over_budget,
         "num_selected": len(selected_rows),
     }

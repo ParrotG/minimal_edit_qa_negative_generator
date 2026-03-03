@@ -12,6 +12,8 @@ from .report import (
 )
 from .selection import assign_quantile_confidence_labels, score_validation_report, select_best_candidates
 from .semantics import evaluate_structured_semantics
+from .unanswerable_prefilter import UnanswerablePrefilterReport, build_reference_answer_hypothesis, check_reference_answer_unsupported
+from .unanswerable_selection import select_first_valid_unanswerable_candidate
 
 __all__ = [
     "CorrectnessConfig",
@@ -28,4 +30,8 @@ __all__ = [
     "score_validation_report",
     "select_best_candidates",
     "evaluate_structured_semantics",
+    "UnanswerablePrefilterReport",
+    "build_reference_answer_hypothesis",
+    "check_reference_answer_unsupported",
+    "select_first_valid_unanswerable_candidate",
 ]

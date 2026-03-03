@@ -4,8 +4,10 @@
 
 - 保留“先 SFT、后 DPO”的总路线。
 - `answerable` 样本采用“gold 主干 + teacher 受约束增广”的方案。
-- `unanswerable` 样本首版采用简单派生，不追求强误导性，先保证可验证与可过滤。
-- `confidence` 字段暂保留在 schema 中，但训练前使用检查器结果重写，不直接使用 teacher 自报值。
+- `unanswerable` 样本改为独立管线：`paired + external + NLI prefilter + teacher refusal rationale + dedicated validate`。
+- `confidence` 字段在 `answerable` 与 `unanswerable` 上分开处理：
+  - `answerable`: 训练前重写为 `derived_confidence`
+  - `unanswerable`: 暂保留 teacher 原值
 - 结构化输出的 JSON 字段顺序暂固定为：
   - `answerability`
   - `evidence`
@@ -34,24 +36,33 @@
 
 ### 2.2 unanswerable
 
-- 从 answerable 样本派生。
-- 首版采用简单负例策略：
-  - 删除至少一个 supporting fact 及其邻句窗口；
-  - 保留段落剩余句子；
-  - 必要时加入相邻段落的少量句子。
-- 自动过滤阶段不追求“最难负例”，先保证：
-  - 剩余 knowledge 确实不支持 reference answer；
-  - 输出以规则化拒答形式呈现。
+- 工作流与 `answerable` 解耦，但复用相同的协议、teacher API 和底层 I/O 工具。
+- raw 构造来源分为两类：
+  - `paired_answerable`: 从已选 `answerable` 样本中构造近似一半
+  - `external_raw`: 从同 split 的剩余 Hotpot raw 池中补齐剩余部分
+- 构造规则：
+  - 先按 `answerable` 相同参数构造 supporting scaffold
+  - 再将 1 条或多条 supporting fact 替换为邻句、同段落非-support 句，或临近段落句
+  - 目标是保持 knowledge 长度与表面分布接近，而不是简单变短
+- teacher 生成前必须经过 `full_binary` NLI 先验判负：
+  - hypothesis 固定为 `The answer is {reference_answer}.`
+  - 仅保留 `full_binary = no` 的样本
+- teacher 生成时不提供 `reference_answer`
+- teacher 的 `unanswerable` completion 仍需满足协议，但 `rationale` 必须指出知识中的缺失、歧义或矛盾
+- `unanswerable` validate 使用独立流程：
+  - 只做 canonicalization、parse、protocol、answerability 一致性、completion token budget
+  - 不做 evidence / correctness / semantic 检查
+  - 暂不做软排序，直接选择首个 hard-pass 候选
 
 ### 2.3 confidence
 
 - schema 中保留 `high | medium | low`。
-- 训练前将 teacher 给出的 `confidence` 覆盖为 `derived_confidence`。
-- 首版的分桶策略：
-  - `high`: 强约束全部通过，且 correctness / semantics 信号最强。
-  - `medium`: 通过主约束，但匹配和支持信号弱于 `high`。
-  - `low`: 通过最小训练约束，但只能判为低信心。
-- 三档都保留进入训练，避免模型只学会输出高信心。
+- `answerable`：
+  - 训练前将 teacher 给出的 `confidence` 覆盖为 `derived_confidence`
+  - `derived_confidence` 由 answerable validator 的 semantic margin 分位数生成
+- `unanswerable`：
+  - v1 暂保留 teacher 原始 `confidence`
+  - 不要求 `derived_confidence`
 
 ## 3. 包结构
 
@@ -77,10 +88,12 @@ src/
     construct.py
     export.py
     hotpot.py
+    hotpot_raw.py
     manifest.py
     negatives.py
     records.py
     split.py
+    unanswerable.py
 
   qa_checks/
     __init__.py
@@ -90,6 +103,8 @@ src/
     report.py
     selection.py
     semantics.py
+    unanswerable_prefilter.py
+    unanswerable_selection.py
 
   qa_judge/
     structured.py
@@ -125,8 +140,10 @@ src/
 ### 4.3 `qa_data`
 
 - HotpotQA 读取。
+- split-assigned raw Hotpot 导出。
 - answerable 构造。
-- 简单 unanswerable 派生。
+- legacy simple unanswerable 派生。
+- v1 unanswerable 构造。
 - split 分配。
 - dataclass 与导出转换。
 
@@ -134,16 +151,17 @@ src/
 
 - protocol 检查。
 - evidence quote 检查。
-- rationale 检查。
+- unanswerable NLI 先验判负。
 - correctness 检查。
 - 结构化语义检查适配。
 - teacher 候选选择与 `derived_confidence` 打分。
+- unanswerable 首候选选择。
 
 ### 4.5 `qa_judge.structured`
 
 - 将现有 `qa_judge` 的 plain QA verifier 适配到结构化输出。
 - answerable 样本优先用 evidence quote 拼接后的支持文本做验证。
-- 必要时回退到 support window knowledge。
+- 不再回退到 support window knowledge。
 
 ### 4.6 `sft_trainer`
 
@@ -172,7 +190,27 @@ src/
 - `context_documents`
 - `metadata`
 
-### 5.2 `teacher_candidates.jsonl`
+### 5.2 `hotpot_rows_split.jsonl`
+
+- `_id`
+- `question`
+- `answer`
+- `type`
+- `level`
+- `context`
+- `supporting_facts`
+- `_source_index`
+- `split`
+
+### 5.3 `unanswerable_prefiltered.jsonl`
+
+- 保留 `raw_examples` 字段；
+- 在 `metadata` 中新增：
+  - `origin_track`
+  - `negative_strategy`
+  - `nli_prefilter`
+
+### 5.4 `teacher_candidates.jsonl`
 
 - `id`
 - `source_id`
@@ -182,7 +220,7 @@ src/
 - `prompt`
 - `raw_output`
 
-### 5.3 `validated_candidates.jsonl`
+### 5.5 `validated_candidates.jsonl`
 
 - 保留 `teacher_candidates` 字段；
 - 新增：
@@ -193,7 +231,20 @@ src/
   - `selection_score`
   - `derived_confidence`
 
-### 5.4 `sft_records.jsonl`
+### 5.6 `validated_unanswerable_candidates.jsonl`
+
+- 保留 `teacher_candidates` 字段；
+- 新增：
+  - `parse_ok`
+  - `parsed_output`
+  - `canonical_output`
+  - `validation_report`
+- 其中：
+  - `correctness = null`
+  - `semantics = null`
+  - `derived_confidence = null`
+
+### 5.7 `sft_records.jsonl`
 
 - `id`
 - `source_id`
@@ -208,10 +259,13 @@ src/
 
 ```bash
 python -m src.grounded_qa.cli source hotpot
-python -m src.grounded_qa.cli source negatives
+python -m src.grounded_qa.cli source hotpot-raw
 python -m src.grounded_qa.cli source split
+python -m src.grounded_qa.cli source unanswerable
+python -m src.grounded_qa.cli source unanswerable-prefilter
 python -m src.grounded_qa.cli teacher generate
 python -m src.grounded_qa.cli teacher validate
+python -m src.grounded_qa.cli teacher validate-unanswerable
 python -m src.grounded_qa.cli build sft-records
 
 python -m src.sft_trainer.prepare_sft_dataset
@@ -224,12 +278,13 @@ python -m src.model_eval.eval_grounded_qa
 ## 7. 实施顺序
 
 1. 落协议层与数据 dataclass。
-2. 打通 Hotpot source、简单 negative、split。
-3. 打通 teacher prompt、生成、验证、选优。
-4. 打通 SFT records 与 DatasetDict 导出。
-5. 接入 LoRA SFT 训练入口。
-6. 接入结构化生成与评估脚本。
-7. 在该骨架稳定后，再对接结构化 DPO。
+2. 打通 Hotpot source、split-assigned raw Hotpot、answerable split。
+3. 打通 v1 unanswerable raw 构造与 NLI prefilter。
+4. 打通 teacher prompt、生成、answerable validate、unanswerable validate。
+5. 打通 SFT records 与 DatasetDict 导出。
+6. 接入 LoRA SFT 训练入口。
+7. 接入结构化生成与评估脚本。
+8. 在该骨架稳定后，再对接结构化 DPO。
 
 ## 8. 本次骨架实现范围
 
@@ -238,6 +293,6 @@ python -m src.model_eval.eval_grounded_qa
 - 落结构化生成与评估脚手架。
 - 不在本次内完成：
   - 复杂负例难度调优；
-  - teacher 候选的高级 rerank；
+  - unanswerable teacher 候选的高级 rerank；
   - DPO 结构化 pair builder；
   - calibration 桶阈值的实验调优。

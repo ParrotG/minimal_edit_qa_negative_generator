@@ -12,8 +12,8 @@ class SplitConfig:
 
     validation_ratio: float = 0.05
     test_ratio: float = 0.05
-    train_sft_ratio: float = 0.70
-    train_dpo_ratio: float = 0.20
+    train_sft_ratio: float = 0.45
+    train_dpo_ratio: float = 0.45
 
 
 def assign_split_name(source_id: str, cfg: SplitConfig) -> str:
