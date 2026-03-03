@@ -9,6 +9,7 @@ from llm_textgen.api_client import OpenAICompatibleTextGenerator
 from qa_checks import (
     CorrectnessConfig,
     check_answer_correctness,
+    check_evidence_against_supporting_facts,
     check_evidence_quotes,
     check_protocol_constraints,
     derive_confidence_label,
@@ -154,19 +155,11 @@ def generate_teacher_candidates(
     prompts: List[str] = []
     jobs: List[Dict[str, Any]] = []
     for row in rows:
-        support_hint = None
-        supporting_sentences = list(row.get("supporting_sentences") or [])
-        if supporting_sentences:
-            quotes = [str(item.get("sentence") or "").strip() for item in supporting_sentences if str(item.get("sentence") or "").strip()]
-            support_hint = "\n".join(quotes[: spec.max_evidence_count]).strip() or None
-
         for candidate_idx in range(cfg.num_candidates_per_example):
             prompt = build_teacher_prompt(
                 knowledge=str(row.get("knowledge") or "").strip(),
                 question=str(row.get("question") or "").strip(),
-                answerability_label=str(row.get("answerability_label") or "").strip(),
                 reference_answer=str(row.get("reference_answer") or "").strip() or None,
-                support_hint=support_hint,
                 spec=spec,
             )
             jobs.append(
@@ -261,6 +254,12 @@ def validate_teacher_candidates(
                 knowledge=str(row.get("knowledge") or ""),
                 spec=spec,
             )
+            support_evidence_report = check_evidence_against_supporting_facts(
+                output=parse_result.parsed,
+                supporting_sentences=list(row.get("supporting_sentences") or []),
+            )
+            evidence_report.ok = bool(evidence_report.ok and support_evidence_report.ok)
+            evidence_report.issues.extend(support_evidence_report.issues)
             gold_answerability = str(row.get("answerability_label") or "").strip()
             if gold_answerability:
                 answerability_match = parse_result.parsed.answerability.value == gold_answerability

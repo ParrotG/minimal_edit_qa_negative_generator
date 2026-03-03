@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, Sequence
+
 from qa_protocol.normalize import normalize_quote
 from qa_protocol.schema import Answerability, StructuredQaOutput
 from qa_protocol.spec import DEFAULT_PROTOCOL_SPEC, ProtocolSpec
@@ -39,6 +41,42 @@ def check_evidence_quotes(
 
     if output.answerability == Answerability.UNANSWERABLE and output.evidence:
         issues.append("Unanswerable output must not include evidence quotes.")
+
+    total = max(1, len(output.evidence))
+    return EvidenceCheckReport(
+        ok=not issues,
+        issues=issues,
+        quote_match_rate=float(matched / total),
+        unique_quotes=len(set(normalized_quotes)),
+    )
+
+
+def check_evidence_against_supporting_facts(
+    *,
+    output: StructuredQaOutput,
+    supporting_sentences: Sequence[dict[str, Any]],
+) -> EvidenceCheckReport:
+    """Check whether answerable evidence is grounded within gold supporting facts."""
+
+    if output.answerability == Answerability.UNANSWERABLE:
+        return EvidenceCheckReport(ok=True, issues=[], quote_match_rate=1.0, unique_quotes=0)
+
+    normalized_supports = [
+        normalize_quote(str(item.get("sentence") or ""))
+        for item in supporting_sentences
+        if str(item.get("sentence") or "").strip()
+    ]
+    issues: list[str] = []
+    matched = 0
+    normalized_quotes: list[str] = []
+
+    for idx, item in enumerate(output.evidence):
+        normalized_quote = normalize_quote(str(item.quote or ""))
+        normalized_quotes.append(normalized_quote)
+        if any(normalized_quote and normalized_quote in support for support in normalized_supports):
+            matched += 1
+        else:
+            issues.append(f"Evidence quote #{idx} is outside the gold supporting facts.")
 
     total = max(1, len(output.evidence))
     return EvidenceCheckReport(

@@ -1,7 +1,7 @@
 """Validation and selection helpers for structured grounded QA outputs."""
 
 from .correctness import CorrectnessConfig, check_answer_correctness
-from .evidence import check_evidence_quotes
+from .evidence import check_evidence_against_supporting_facts, check_evidence_quotes
 from .protocol import check_protocol_constraints
 from .report import (
     CorrectnessCheckReport,
@@ -21,6 +21,7 @@ __all__ = [
     "SemanticCheckReport",
     "ValidationReport",
     "check_answer_correctness",
+    "check_evidence_against_supporting_facts",
     "check_evidence_quotes",
     "check_protocol_constraints",
     "derive_confidence_label",

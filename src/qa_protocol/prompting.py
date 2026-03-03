@@ -17,9 +17,7 @@ def build_teacher_prompt(
     *,
     knowledge: str,
     question: str,
-    answerability_label: str,
     reference_answer: Optional[str] = None,
-    support_hint: Optional[str] = None,
     spec: ProtocolSpec = DEFAULT_PROTOCOL_SPEC,
     answer_style: Optional[AnswerStylePolicy] = None,
 ) -> str:
@@ -40,24 +38,20 @@ def build_teacher_prompt(
             "Keep your final answer semantically consistent with the reference answer.\n\n"
         )
 
-    support_block = ""
-    if support_hint:
-        support_block = f"Support hint:\n{support_hint}\n\n"
-
     return (
         "You are preparing structured grounded-QA supervision data.\n"
         "Return exactly one JSON object and nothing else.\n"
         "Requirements:\n"
         "1) Use the field order: answerability, evidence, rationale, answer, confidence.\n"
         "2) Every evidence quote must be copied from the provided knowledge.\n"
-        "3) The rationale must be a brief explanation of how the evidence leads to the answer.\n"
-        "4) The rationale must not be identical to the final answer text.\n"
-        "5) When the question is answerable, cite evidence and answer directly.\n"
-        "6) When the question is unanswerable, use an allowed refusal template and keep evidence as [].\n"
-        f"7) {answer_guidance}\n\n"
-        f"Target answerability label: {answerability_label}\n\n"
+        "3) Evidence must be the smallest sufficient span or spans from the knowledge needed to answer the question.\n"
+        "4) The rationale must use only the information contained in the evidence.\n"
+        "5) The rationale must perform only the minimal reasoning needed to reach the answer.\n"
+        "6) The rationale must not be identical to the final answer text.\n"
+        "7) When the question is answerable, cite evidence and answer directly.\n"
+        "8) When the question is unanswerable, use an allowed refusal template and keep evidence as [].\n"
+        f"9) {answer_guidance}\n\n"
         f"{reference_block}"
-        f"{support_block}"
         "JSON schema:\n"
         f"{_schema_example()}\n\n"
         f"Allowed refusal templates: {list(spec.refusal_templates)}\n\n"
