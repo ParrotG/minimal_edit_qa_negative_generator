@@ -46,7 +46,10 @@ def example_from_dict(row: Dict[str, Any]) -> QaExample:
         id=str(row.get("id") or "").strip(),
         source_id=str(row.get("source_id") or "").strip(),
         variant_id=str(row.get("variant_id") or "").strip(),
-        split=None if row.get("split") is None else str(row.get("split")).strip(),
+        data_split=None if row.get("data_split") is None else str(row.get("data_split")).strip(),
+        answerability_split=None
+        if row.get("answerability_split") is None
+        else str(row.get("answerability_split")).strip(),
         question=str(row.get("question") or "").strip(),
         knowledge=str(row.get("knowledge") or "").strip(),
         reference_answer=str(row.get("reference_answer") or "").strip(),

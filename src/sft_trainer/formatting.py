@@ -49,7 +49,7 @@ def build_sft_record(row: Dict[str, Any], prompt_style: str) -> Optional[Dict[st
     return {
         "id": str(row.get("id") or "").strip(),
         "source_id": str(row.get("source_id") or "").strip(),
-        "split": row.get("split"),
+        "data_split": row.get("data_split"),
         "prompt_style": prompt_style,
         "prompt": prompt,
         "completion": canonical_output,
@@ -58,6 +58,7 @@ def build_sft_record(row: Dict[str, Any], prompt_style: str) -> Optional[Dict[st
             "reference_answer": str(row.get("reference_answer") or "").strip(),
             "answerability_label": str(row.get("answerability_label") or "").strip(),
             "difficulty": str(row.get("difficulty") or "").strip(),
+            "answerability_split": str(row.get("answerability_split") or "").strip(),
             "validation_report": validation_report,
         },
     }

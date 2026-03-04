@@ -62,7 +62,7 @@ def _load_eval_items(data_path: str, split: str, max_samples: int, seed: int) ->
                 "knowledge": knowledge,
                 "reference_answer": pick_first_non_empty_str(row, ["reference_answer", "answer"]),
                 "answerability_label": str(row.get("answerability_label") or "").strip(),
-                "split": row.get("split") or split,
+                "data_split": row.get("data_split") or split,
             }
         )
         if max_samples > 0 and len(out) >= max_samples:
@@ -138,7 +138,7 @@ def main() -> None:
                         "knowledge": sample["knowledge"],
                         "reference_answer": sample["reference_answer"],
                         "answerability_label": sample["answerability_label"],
-                        "split": sample["split"],
+                        "data_split": sample["data_split"],
                         "prompt_style": "infer_v1",
                         "prompt": prompt,
                         "raw_output": raw_output,

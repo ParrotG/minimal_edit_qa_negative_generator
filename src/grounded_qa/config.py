@@ -24,8 +24,6 @@ class TeacherGenerationConfig:
     temperature: float = 0.2
     top_p: float = 0.95
     seed: int = 42
-    prefilter_tokenizer_name: str = "Qwen/Qwen3-0.6B"
-    max_prompt_tokens: int = 512
 
     def to_api_config(self) -> ApiGenerationConfig:
         """Convert to the reusable API generation config."""
@@ -46,6 +44,22 @@ class TeacherGenerationConfig:
 
 
 @dataclass(frozen=True)
+class SourcePrefilterConfig:
+    """Source-stage filtering defaults for mixed prepared examples."""
+
+    tokenizer_name: str = "Qwen/Qwen3-0.6B"
+    max_prompt_tokens: int = 512
+    enable_unanswerable_nli: bool = True
+    nli_model_name: str = NLIConfig.model_name
+    nli_device: str = NLIConfig.device
+    nli_batch_size: int = NLIConfig.batch_size
+    nli_max_length: int = NLIConfig.max_length
+    nli_fp16: bool = NLIConfig.fp16
+    temperature: float = JudgeConfig.temperature
+    full_margin_threshold: float = JudgeConfig.full_margin_threshold
+
+
+@dataclass(frozen=True)
 class ValidationConfig:
     """Validation defaults for teacher candidates."""
 
@@ -54,39 +68,6 @@ class ValidationConfig:
     semantic_decision_source: str = "full_binary"
     tokenizer_name: str = "Qwen/Qwen3-0.6B"
     max_completion_tokens: int = 512
-    prefilter_tokenizer_name: str = "Qwen/Qwen3-0.6B"
-    max_prompt_tokens: int = 512
-
-
-@dataclass(frozen=True)
-class UnanswerablePipelineConfig:
-    """Configuration for v1 unanswerable raw construction."""
-
-    target_split: str = "train_sft_raw"
-    paired_fraction: float = 0.5
-    max_total_examples: int = -1
-    replace_supporting_facts_min: int = 1
-    replace_supporting_facts_max: int = 1
-    same_doc_candidate_radius: int = 1
-    allow_same_doc_non_adjacent: bool = True
-    adjacent_doc_sentence_limit: int = 1
-    include_title_prefix: bool = True
-    seed: int = 42
-
-
-@dataclass(frozen=True)
-class UnanswerablePrefilterConfig:
-    """Configuration for the unanswerable NLI prefilter."""
-
-    enable_nli_prefilter: bool = True
-    judge_decision_source: str = "full_binary"
-    nli_model_name: str = NLIConfig.model_name
-    nli_device: str = NLIConfig.device
-    nli_batch_size: int = NLIConfig.batch_size
-    nli_max_length: int = NLIConfig.max_length
-    nli_fp16: bool = NLIConfig.fp16
-    temperature: float = JudgeConfig.temperature
-    full_margin_threshold: float = JudgeConfig.full_margin_threshold
 
 
 @dataclass(frozen=True)

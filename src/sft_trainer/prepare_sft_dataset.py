@@ -42,7 +42,7 @@ def main() -> None:
 
     split_rows: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
-        split = str(row.get("split") or "train")
+        split = str(row.get("data_split") or "train")
         if split == "train_sft_raw":
             split = "train"
         split_rows.setdefault(split, []).append(dict(row))

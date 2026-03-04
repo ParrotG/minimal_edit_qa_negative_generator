@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from .construct import ConstructionConfig, build_answerable_example
 from .records import ContextDocument, QaExample, SupportingSentence
@@ -10,10 +10,8 @@ from .records import ContextDocument, QaExample, SupportingSentence
 
 @dataclass(frozen=True)
 class UnanswerableBuildConfig:
-    """Configuration for v1 unanswerable raw-example construction."""
+    """Configuration for unanswerable example construction."""
 
-    paired_fraction: float = 0.5
-    max_total_examples: int = -1
     replace_supporting_facts_min: int = 1
     replace_supporting_facts_max: int = 1
     same_doc_candidate_radius: int = 1
@@ -60,7 +58,6 @@ def _same_doc_candidates(
 
     support_idx = _support_index(example)
     candidates: list[tuple[str, int, str]] = []
-
     for sent_id, sentence in enumerate(doc.sentences):
         if (support.title, sent_id) in support_idx:
             continue
@@ -123,20 +120,22 @@ def build_unanswerable_from_answerable_example(
     example: QaExample,
     cfg: UnanswerableBuildConfig,
     *,
-    origin_track: str = "paired_answerable",
-    paired_answerable_id: str | None = None,
-    paired_answerable_source_id: str | None = None,
-    raw_source_split: str | None = None,
+    origin_track: str,
+    raw_source_id: str,
+    data_split: str | None,
+    answerability_split: str | None,
 ) -> Optional[QaExample]:
-    """Derive one v1 unanswerable example from an answerable scaffold."""
+    """Derive one unanswerable example from an answerable scaffold."""
 
     if example.answerability_label != "answerable":
         return None
     if not example.supporting_sentences or not example.context_documents:
         return None
 
-    rng = _stable_rng(cfg.seed, example.source_id, example.variant_id, origin_track)
+    rng = _stable_rng(cfg.seed, example.source_id, example.variant_id, origin_track, answerability_split or "")
     max_replace = min(cfg.replace_supporting_facts_max, len(example.supporting_sentences))
+    if max_replace <= 0:
+        return None
     min_replace = max(1, min(cfg.replace_supporting_facts_min, max_replace))
     num_replace = rng.randint(min_replace, max_replace)
     replaced_supports = rng.sample(list(example.supporting_sentences), k=num_replace)
@@ -156,23 +155,16 @@ def build_unanswerable_from_answerable_example(
                 "sentence": str(replacement[2]).strip(),
             }
         )
-        replaced_meta.append(
-            {
-                "title": support.title,
-                "sent_id": int(support.sent_id),
-            }
-        )
+        replaced_meta.append({"title": support.title, "sent_id": int(support.sent_id)})
 
     knowledge_blocks: list[str] = []
     for support in example.supporting_sentences:
         key = (support.title, support.sent_id)
         if key in replacement_by_support:
-            rep_title, rep_sent_id, rep_sentence = replacement_by_support[key]
+            rep_title, _, rep_sentence = replacement_by_support[key]
             block = _format_sentence_block(rep_title, rep_sentence, cfg.include_title_prefix)
         else:
-            rep_sent_id = None
             block = str(support.window_text or "").strip()
-        _ = rep_sent_id
         if block:
             knowledge_blocks.append(block)
 
@@ -187,26 +179,30 @@ def build_unanswerable_from_answerable_example(
     if not knowledge or knowledge == example.knowledge:
         return None
 
-    metadata = dict(example.metadata)
-    metadata["origin_track"] = origin_track
-    metadata["paired_answerable_id"] = paired_answerable_id
-    metadata["paired_answerable_source_id"] = paired_answerable_source_id
-    metadata["raw_source_split"] = raw_source_split or example.split
-    metadata["negative_strategy"] = {
-        "mode": "support_replace_v1",
-        "replaced_supports": replaced_meta,
-        "replacement_sentences": replacement_sentences,
-        "construction_from": "answerable_example" if origin_track == "paired_answerable" else "raw_hotpot_row",
-        "same_doc_candidate_radius": cfg.same_doc_candidate_radius,
-        "adjacent_doc_sentence_limit": cfg.adjacent_doc_sentence_limit,
-    }
     variant_id = "unanswerable-paired-v1" if origin_track == "paired_answerable" else "unanswerable-external-v1"
+    metadata = dict(example.metadata)
+    metadata.update(
+        {
+            "origin_track": origin_track,
+            "raw_source_id": raw_source_id,
+            "data_split": data_split,
+            "answerability_split": answerability_split,
+            "negative_strategy": {
+                "mode": "support_replace_v1",
+                "replaced_supports": replaced_meta,
+                "replacement_sentences": replacement_sentences,
+                "same_doc_candidate_radius": cfg.same_doc_candidate_radius,
+                "adjacent_doc_sentence_limit": cfg.adjacent_doc_sentence_limit,
+            },
+        }
+    )
 
     return QaExample(
         id=f"{example.source_id}:{variant_id}",
         source_id=example.source_id,
         variant_id=variant_id,
-        split=example.split,
+        data_split=data_split,
+        answerability_split=answerability_split,
         question=example.question,
         knowledge=knowledge,
         reference_answer=example.reference_answer,
@@ -218,115 +214,85 @@ def build_unanswerable_from_answerable_example(
     )
 
 
-def build_unanswerable_from_raw_hotpot_row(
+def _clone_answerable_example(
+    example: QaExample,
+    *,
+    data_split: str | None,
+    answerability_split: str | None,
+) -> QaExample:
+    metadata = dict(example.metadata)
+    metadata.update(
+        {
+            "origin_track": "answerable",
+            "raw_source_id": example.source_id,
+            "data_split": data_split,
+            "answerability_split": answerability_split,
+        }
+    )
+    return QaExample(
+        id=example.id,
+        source_id=example.source_id,
+        variant_id=example.variant_id,
+        data_split=data_split,
+        answerability_split=answerability_split,
+        question=example.question,
+        knowledge=example.knowledge,
+        reference_answer=example.reference_answer,
+        answerability_label=example.answerability_label,
+        difficulty=example.difficulty,
+        supporting_sentences=example.supporting_sentences,
+        context_documents=example.context_documents,
+        metadata=metadata,
+    )
+
+
+def build_examples_from_tagged_row(
     row: Dict[str, object],
     construct_cfg: ConstructionConfig,
-    cfg: UnanswerableBuildConfig,
-) -> Optional[QaExample]:
-    """Build one unanswerable example from a raw Hotpot row via an answerable scaffold."""
+    unanswerable_cfg: UnanswerableBuildConfig,
+) -> list[QaExample]:
+    """Build concrete examples from one tagged Hotpot row."""
 
+    answerability_split = str(row.get("answerability_split") or "").strip()
+    data_split = str(row.get("data_split") or "").strip() or None
     scaffold = build_answerable_example(row, construct_cfg)
     if scaffold is None:
-        return None
-    scaffold = QaExample(
-        id=scaffold.id,
-        source_id=scaffold.source_id,
-        variant_id=scaffold.variant_id,
-        split=str(row.get("split") or scaffold.split or "").strip() or scaffold.split,
-        question=scaffold.question,
-        knowledge=scaffold.knowledge,
-        reference_answer=scaffold.reference_answer,
-        answerability_label=scaffold.answerability_label,
-        difficulty=scaffold.difficulty,
-        supporting_sentences=scaffold.supporting_sentences,
-        context_documents=scaffold.context_documents,
-        metadata=dict(scaffold.metadata),
-    )
-    return build_unanswerable_from_answerable_example(
-        scaffold,
-        cfg,
-        origin_track="external_raw",
-        paired_answerable_id=None,
-        paired_answerable_source_id=None,
-        raw_source_split=str(row.get("split") or "").strip() or scaffold.split,
-    )
-
-
-def select_unanswerable_input_pools(
-    *,
-    paired_examples: Sequence[QaExample],
-    raw_hotpot_rows: Sequence[Dict[str, object]],
-    target_split: str,
-    cfg: UnanswerableBuildConfig,
-) -> tuple[list[QaExample], list[Dict[str, object]]]:
-    """Select paired and external input pools for unanswerable raw construction."""
-
-    rng = _stable_rng(cfg.seed, target_split, "unanswerable-pools")
-    paired_pool = [example for example in paired_examples if str(example.split or "") == target_split]
-    external_pool = [dict(row) for row in raw_hotpot_rows if str(row.get("split") or "") == target_split]
-
-    rng.shuffle(paired_pool)
-    rng.shuffle(external_pool)
-
-    if cfg.max_total_examples > 0:
-        paired_target = max(0, min(len(paired_pool), round(cfg.max_total_examples * cfg.paired_fraction)))
-        external_target = max(0, cfg.max_total_examples - paired_target)
-    else:
-        paired_target = len(paired_pool)
-        external_target = paired_target
-
-    paired_selected = paired_pool[:paired_target]
-    paired_source_ids = {item.source_id for item in paired_selected}
-    external_selected: list[Dict[str, object]] = []
-    for row in external_pool:
-        source_id = str(row.get("_id") or row.get("id") or row.get("_source_index") or "").strip()
-        if source_id in paired_source_ids:
-            continue
-        external_selected.append(row)
-        if len(external_selected) >= external_target:
-            break
-
-    return paired_selected, external_selected
-
-
-def build_unanswerable_examples_from_pools(
-    *,
-    paired_examples: Sequence[QaExample],
-    raw_hotpot_rows: Sequence[Dict[str, object]],
-    target_split: str,
-    construct_cfg: ConstructionConfig,
-    cfg: UnanswerableBuildConfig,
-) -> list[QaExample]:
-    """Build unanswerable examples from paired answerable and external raw pools."""
-
-    paired_selected, external_selected = select_unanswerable_input_pools(
-        paired_examples=paired_examples,
-        raw_hotpot_rows=raw_hotpot_rows,
-        target_split=target_split,
-        cfg=cfg,
-    )
+        return []
 
     out: list[QaExample] = []
-    seen_ids: set[str] = set()
-    for example in paired_selected:
-        built = build_unanswerable_from_answerable_example(
-            example,
-            cfg,
-            origin_track="paired_answerable",
-            paired_answerable_id=example.id,
-            paired_answerable_source_id=example.source_id,
-            raw_source_split=example.split,
+    if answerability_split in {"answerable", "both"}:
+        out.append(
+            _clone_answerable_example(
+                scaffold,
+                data_split=data_split,
+                answerability_split=answerability_split or None,
+            )
         )
-        if built is None or built.id in seen_ids:
-            continue
-        seen_ids.add(built.id)
-        out.append(built)
 
-    for row in external_selected:
-        built = build_unanswerable_from_raw_hotpot_row(row, construct_cfg, cfg)
-        if built is None or built.id in seen_ids:
-            continue
-        seen_ids.add(built.id)
-        out.append(built)
+    if answerability_split in {"unanswerable", "both"}:
+        origin_track = "paired_answerable" if answerability_split == "both" else "external_raw"
+        derived = build_unanswerable_from_answerable_example(
+            scaffold,
+            unanswerable_cfg,
+            origin_track=origin_track,
+            raw_source_id=str(row.get("_id") or row.get("id") or row.get("_source_index") or scaffold.source_id),
+            data_split=data_split,
+            answerability_split=answerability_split or None,
+        )
+        if derived is not None:
+            out.append(derived)
 
+    return out
+
+
+def build_prepared_examples(
+    rows: Sequence[Dict[str, object]],
+    construct_cfg: ConstructionConfig,
+    unanswerable_cfg: UnanswerableBuildConfig,
+) -> list[QaExample]:
+    """Build mixed concrete examples from tagged raw rows."""
+
+    out: list[QaExample] = []
+    for row in rows:
+        out.extend(build_examples_from_tagged_row(row, construct_cfg, unanswerable_cfg))
     return out

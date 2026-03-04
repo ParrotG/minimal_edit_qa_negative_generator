@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dataio import read_jsonl, write_json, write_jsonl
 from llm_textgen.api_client import OpenAICompatibleTextGenerator
@@ -12,28 +12,25 @@ from qa_checks import (
     check_evidence_against_supporting_facts,
     check_evidence_quotes,
     check_protocol_constraints,
-    check_reference_answer_unsupported,
     evaluate_structured_semantics,
+    prefilter_mixed_examples,
     score_validation_report,
-    select_first_valid_unanswerable_candidate,
     select_best_candidates,
+    select_first_valid_unanswerable_candidate,
 )
 from qa_checks.report import CorrectnessCheckReport, EvidenceCheckReport, ProtocolCheckReport, SemanticCheckReport, ValidationReport
 from qa_checks.selection import assign_quantile_confidence_labels
 from qa_data import (
+    AnswerabilitySplitConfig,
     ConstructionConfig,
+    DataSplitConfig,
     HotpotSourceConfig,
-    NegativeSamplingConfig,
-    SplitConfig,
     UnanswerableBuildConfig,
-    assign_split,
-    build_unanswerable_examples_from_pools,
-    build_answerable_example,
-    derive_simple_unanswerable,
+    build_prepared_examples,
     example_from_dict,
     example_to_dict,
-    iter_hotpot_rows,
-    iter_split_hotpot_rows,
+    iter_tagged_hotpot_rows,
+    write_partitioned_examples,
 )
 from qa_judge.config import JudgeConfig, NLIConfig
 from qa_judge.judge import AnswerJudge
@@ -43,7 +40,6 @@ from qa_protocol import (
     Answerability,
     ConfidenceLevel,
     DEFAULT_PROTOCOL_SPEC,
-    build_infer_prompt,
     build_teacher_prompt,
     count_text_tokens,
     parse_structured_output,
@@ -53,59 +49,32 @@ from qa_protocol import (
 from qa_protocol.spec import ProtocolSpec
 from sft_trainer.formatting import build_sft_record
 
-from .config import TeacherGenerationConfig, UnanswerablePipelineConfig, UnanswerablePrefilterConfig, ValidationConfig
+from .config import SourcePrefilterConfig, TeacherGenerationConfig, ValidationConfig
 
 
-def build_hotpot_source(
+def tag_source_rows(
     *,
     out_path: str,
     metrics_out: Optional[str],
     source_cfg: HotpotSourceConfig,
-    construct_cfg: ConstructionConfig,
-) -> Dict[str, int]:
-    """Build answerable source examples from HotpotQA."""
+    data_split_cfg: DataSplitConfig,
+    answerability_split_cfg: AnswerabilitySplitConfig,
+) -> Dict[str, Any]:
+    """Read Hotpot rows and assign independent data and answerability split tags."""
 
-    rows: List[Dict[str, Any]] = []
-    num_input = 0
-    num_kept = 0
-
-    for raw_row in iter_hotpot_rows(source_cfg):
-        num_input += 1
-        example = build_answerable_example(raw_row, construct_cfg)
-        if example is None:
-            continue
-        num_kept += 1
-        rows.append(example_to_dict(example))
+    rows = list(iter_tagged_hotpot_rows(source_cfg, data_split_cfg, answerability_split_cfg))
+    data_split_counts: Dict[str, int] = {}
+    answerability_split_counts: Dict[str, int] = {}
+    for row in rows:
+        data_split = str(row.get("data_split") or "").strip()
+        answerability_split = str(row.get("answerability_split") or "").strip()
+        data_split_counts[data_split] = data_split_counts.get(data_split, 0) + 1
+        answerability_split_counts[answerability_split] = answerability_split_counts.get(answerability_split, 0) + 1
 
     metrics = {
-        "num_input": num_input,
-        "num_kept": num_kept,
-        "num_dropped": num_input - num_kept,
-    }
-    write_jsonl(out_path, rows)
-    if metrics_out:
-        write_json(metrics_out, metrics)
-    return metrics
-
-
-def export_split_hotpot_rows(
-    *,
-    out_path: str,
-    metrics_out: Optional[str],
-    source_cfg: HotpotSourceConfig,
-    split_cfg: SplitConfig,
-) -> Dict[str, Any]:
-    """Export raw Hotpot rows with stable split assignments."""
-
-    rows = list(iter_split_hotpot_rows(source_cfg, split_cfg))
-    split_counts: Dict[str, int] = {}
-    for row in rows:
-        split_name = str(row.get("split") or "").strip()
-        split_counts[split_name] = split_counts.get(split_name, 0) + 1
-
-    metrics: Dict[str, Any] = {
         "num_rows": len(rows),
-        "split_counts": split_counts,
+        "data_split_counts": data_split_counts,
+        "answerability_split_counts": answerability_split_counts,
     }
     write_jsonl(out_path, rows)
     if metrics_out:
@@ -113,31 +82,37 @@ def export_split_hotpot_rows(
     return metrics
 
 
-def build_simple_negatives(
+def build_source_examples(
     *,
     in_path: str,
     out_path: str,
     metrics_out: Optional[str],
-    negative_cfg: NegativeSamplingConfig,
-) -> Dict[str, int]:
-    """Build first-pass unanswerable rows from answerable examples."""
+    construct_cfg: ConstructionConfig,
+    unanswerable_cfg: UnanswerableBuildConfig,
+) -> Dict[str, Any]:
+    """Build mixed concrete grounded-QA examples from tagged raw rows."""
 
-    source_rows = list(read_jsonl(in_path))
-    out_rows: List[Dict[str, Any]] = []
-    num_kept = 0
+    rows = [dict(row) for row in read_jsonl(in_path)]
+    built_examples = build_prepared_examples(rows, construct_cfg, unanswerable_cfg)
+    out_rows = [example_to_dict(example) for example in built_examples]
 
-    for row in source_rows:
-        example = example_from_dict(dict(row))
-        derived = derive_simple_unanswerable(example, negative_cfg)
-        if derived is None:
-            continue
-        num_kept += 1
-        out_rows.append(example_to_dict(derived))
+    by_label: Dict[str, int] = {}
+    by_data_split: Dict[str, int] = {}
+    by_answerability_split: Dict[str, int] = {}
+    for row in out_rows:
+        label = str(row.get("answerability_label") or "").strip()
+        data_split = str(row.get("data_split") or "").strip()
+        answerability_split = str(row.get("answerability_split") or "").strip()
+        by_label[label] = by_label.get(label, 0) + 1
+        by_data_split[data_split] = by_data_split.get(data_split, 0) + 1
+        by_answerability_split[answerability_split] = by_answerability_split.get(answerability_split, 0) + 1
 
     metrics = {
-        "num_input": len(source_rows),
-        "num_kept": num_kept,
-        "num_dropped": len(source_rows) - num_kept,
+        "num_input_rows": len(rows),
+        "num_output_rows": len(out_rows),
+        "answerability_label_counts": by_label,
+        "data_split_counts": by_data_split,
+        "answerability_split_counts": by_answerability_split,
     }
     write_jsonl(out_path, out_rows)
     if metrics_out:
@@ -145,89 +120,7 @@ def build_simple_negatives(
     return metrics
 
 
-def split_examples(
-    *,
-    in_path: str,
-    out_path: str,
-    metrics_out: Optional[str],
-    split_cfg: SplitConfig,
-) -> Dict[str, Any]:
-    """Assign stable split labels to raw examples."""
-
-    rows = list(read_jsonl(in_path))
-    out_rows: List[Dict[str, Any]] = []
-    split_counts: Dict[str, int] = {}
-
-    for row in rows:
-        example = assign_split(example_from_dict(dict(row)), split_cfg)
-        split_counts[example.split or ""] = split_counts.get(example.split or "", 0) + 1
-        out_rows.append(example_to_dict(example))
-
-    metrics: Dict[str, Any] = {
-        "num_rows": len(out_rows),
-        "split_counts": split_counts,
-    }
-    write_jsonl(out_path, out_rows)
-    if metrics_out:
-        write_json(metrics_out, metrics)
-    return metrics
-
-
-def build_unanswerable_source(
-    *,
-    paired_answerable_path: str,
-    raw_hotpot_pool_path: str,
-    out_path: str,
-    metrics_out: Optional[str],
-    pipeline_cfg: UnanswerablePipelineConfig,
-    construct_cfg: ConstructionConfig,
-) -> Dict[str, Any]:
-    """Build v1 unanswerable raw examples from paired and external pools."""
-
-    paired_examples = [example_from_dict(dict(row)) for row in read_jsonl(paired_answerable_path)]
-    raw_hotpot_rows = [dict(row) for row in read_jsonl(raw_hotpot_pool_path)]
-    build_cfg = UnanswerableBuildConfig(
-        paired_fraction=pipeline_cfg.paired_fraction,
-        max_total_examples=pipeline_cfg.max_total_examples,
-        replace_supporting_facts_min=pipeline_cfg.replace_supporting_facts_min,
-        replace_supporting_facts_max=pipeline_cfg.replace_supporting_facts_max,
-        same_doc_candidate_radius=pipeline_cfg.same_doc_candidate_radius,
-        allow_same_doc_non_adjacent=pipeline_cfg.allow_same_doc_non_adjacent,
-        adjacent_doc_sentence_limit=pipeline_cfg.adjacent_doc_sentence_limit,
-        include_title_prefix=pipeline_cfg.include_title_prefix,
-        seed=pipeline_cfg.seed,
-    )
-
-    built_examples = build_unanswerable_examples_from_pools(
-        paired_examples=paired_examples,
-        raw_hotpot_rows=raw_hotpot_rows,
-        target_split=pipeline_cfg.target_split,
-        construct_cfg=construct_cfg,
-        cfg=build_cfg,
-    )
-    rows = [example_to_dict(example) for example in built_examples]
-
-    origin_counts: Dict[str, int] = {}
-    for row in rows:
-        origin = str(((row.get("metadata") or {}).get("origin_track")) or "")
-        origin_counts[origin] = origin_counts.get(origin, 0) + 1
-
-    metrics: Dict[str, Any] = {
-        "num_paired_input": sum(1 for example in paired_examples if str(example.split or "") == pipeline_cfg.target_split),
-        "num_external_input": sum(1 for row in raw_hotpot_rows if str(row.get("split") or "") == pipeline_cfg.target_split),
-        "num_paired_selected": origin_counts.get("paired_answerable", 0),
-        "num_external_selected": origin_counts.get("external_raw", 0),
-        "num_kept": len(rows),
-        "origin_counts": origin_counts,
-        "target_split": pipeline_cfg.target_split,
-    }
-    write_jsonl(out_path, rows)
-    if metrics_out:
-        write_json(metrics_out, metrics)
-    return metrics
-
-
-def _build_unanswerable_prefilter_judge(cfg: UnanswerablePrefilterConfig) -> AnswerJudge:
+def _build_source_prefilter_judge(cfg: SourcePrefilterConfig) -> AnswerJudge:
     verifier = NLIVerifier(
         model_name=cfg.nli_model_name,
         device=cfg.nli_device,
@@ -247,87 +140,42 @@ def _build_unanswerable_prefilter_judge(cfg: UnanswerablePrefilterConfig) -> Ans
     return AnswerJudge(cfg=judge_cfg, verifier=verifier)
 
 
-def prefilter_unanswerable_source(
+def prefilter_source_examples(
     *,
     in_path: str,
     out_path: str,
     metrics_out: Optional[str],
-    cfg: UnanswerablePrefilterConfig,
+    cfg: SourcePrefilterConfig,
 ) -> Dict[str, Any]:
-    """Keep only raw unanswerable samples whose original answer is no longer supported."""
+    """Apply mixed source-stage filtering before teacher generation."""
 
     rows = [dict(row) for row in read_jsonl(in_path)]
-    if not cfg.enable_nli_prefilter:
-        write_jsonl(out_path, rows)
-        metrics = {
-            "num_input": len(rows),
-            "num_kept": len(rows),
-            "num_dropped": 0,
-            "num_full_binary_no": 0,
-            "num_full_binary_yes": 0,
-            "mean_margin_kept": 0.0,
-        }
-        if metrics_out:
-            write_json(metrics_out, metrics)
-        return metrics
-
-    if cfg.judge_decision_source != "full_binary":
-        raise ValueError(f"Unsupported judge_decision_source: {cfg.judge_decision_source}")
-
-    judge = _build_unanswerable_prefilter_judge(cfg)
-    kept_rows: List[Dict[str, Any]] = []
-    num_no = 0
-    num_yes = 0
-    kept_margins: List[float] = []
-
-    for row in rows:
-        report = check_reference_answer_unsupported(
-            knowledge=str(row.get("knowledge") or "").strip(),
-            question=str(row.get("question") or "").strip(),
-            reference_answer=str(row.get("reference_answer") or "").strip(),
-            judge=judge,
-        )
-        metadata = dict(row.get("metadata") or {})
-        metadata["nli_prefilter"] = {
-            "keep": bool(report.keep),
-            "full_binary_decision": report.full_binary_decision,
-            "margin": report.margin,
-            "issues": list(report.issues),
-            "judge_payload": report.judge_payload,
-        }
-        row["metadata"] = metadata
-        if report.full_binary_decision == "no":
-            num_no += 1
-        else:
-            num_yes += 1
-        if report.keep:
-            kept_rows.append(row)
-            if report.margin is not None:
-                kept_margins.append(float(report.margin))
-
-    mean_margin_kept = float(sum(kept_margins) / len(kept_margins)) if kept_margins else 0.0
-    metrics = {
-        "num_input": len(rows),
-        "num_kept": len(kept_rows),
-        "num_dropped": len(rows) - len(kept_rows),
-        "num_full_binary_no": num_no,
-        "num_full_binary_yes": num_yes,
-        "mean_margin_kept": mean_margin_kept,
-    }
+    judge = _build_source_prefilter_judge(cfg) if cfg.enable_unanswerable_nli else None
+    kept_rows, metrics = prefilter_mixed_examples(
+        rows,
+        tokenizer_name=cfg.tokenizer_name,
+        max_prompt_tokens=cfg.max_prompt_tokens,
+        enable_unanswerable_nli=cfg.enable_unanswerable_nli,
+        judge=judge,
+    )
     write_jsonl(out_path, kept_rows)
     if metrics_out:
         write_json(metrics_out, metrics)
     return metrics
 
 
-def _prompt_within_budget(row: Dict[str, Any], cfg: TeacherGenerationConfig, spec: ProtocolSpec) -> tuple[bool, int, str]:
-    prompt = build_infer_prompt(
-        knowledge=str(row.get("knowledge") or "").strip(),
-        question=str(row.get("question") or "").strip(),
-        spec=spec,
-    )
-    prompt_tokens = count_text_tokens(prompt, cfg.prefilter_tokenizer_name)
-    return prompt_tokens <= cfg.max_prompt_tokens, prompt_tokens, prompt
+def partition_source_examples(
+    *,
+    in_path: str,
+    out_dir: str,
+    metrics_out: Optional[str],
+) -> Dict[str, Any]:
+    """Partition mixed prepared examples by downstream data split."""
+
+    rows = [dict(row) for row in read_jsonl(in_path)]
+    os.makedirs(out_dir, exist_ok=True)
+    metrics = write_partitioned_examples(rows, out_dir, metrics_out=metrics_out)
+    return metrics
 
 
 def generate_teacher_candidates(
@@ -338,7 +186,7 @@ def generate_teacher_candidates(
     cfg: TeacherGenerationConfig,
     spec: ProtocolSpec = DEFAULT_PROTOCOL_SPEC,
 ) -> Dict[str, int]:
-    """Generate teacher candidates for structured grounded QA."""
+    """Generate teacher candidates for mixed structured grounded-QA examples."""
 
     rows = list(read_jsonl(in_path))
     api_key = os.getenv(cfg.api_key_env, "").strip()
@@ -346,21 +194,17 @@ def generate_teacher_candidates(
 
     prompts: List[str] = []
     jobs: List[Dict[str, Any]] = []
-    num_drop_prompt_over_budget = 0
-    num_retained_examples = 0
-
     for row in rows:
-        within_budget, prompt_tokens, prefilter_prompt = _prompt_within_budget(row, cfg, spec)
-        if not within_budget:
-            num_drop_prompt_over_budget += 1
-            continue
-
-        num_retained_examples += 1
+        reference_answer = (
+            str(row.get("reference_answer") or "").strip() or None
+            if str(row.get("answerability_label") or "") == "answerable"
+            else None
+        )
         for candidate_idx in range(cfg.num_candidates_per_example):
             prompt = build_teacher_prompt(
                 knowledge=str(row.get("knowledge") or "").strip(),
                 question=str(row.get("question") or "").strip(),
-                reference_answer=str(row.get("reference_answer") or "").strip() or None,
+                reference_answer=reference_answer,
                 spec=spec,
             )
             jobs.append(
@@ -368,8 +212,6 @@ def generate_teacher_candidates(
                     "row": row,
                     "candidate_id": candidate_idx,
                     "prompt": prompt,
-                    "prefilter_prompt": prefilter_prompt,
-                    "prefilter_prompt_tokens": prompt_tokens,
                 }
             )
             prompts.append(prompt)
@@ -385,16 +227,12 @@ def generate_teacher_candidates(
                 "teacher_model": cfg.api_model_name,
                 "prompt_style": cfg.prompt_style,
                 "prompt": job["prompt"],
-                "prefilter_prompt": job["prefilter_prompt"],
-                "prefilter_prompt_tokens": int(job["prefilter_prompt_tokens"]),
                 "raw_output": raw_output,
             }
         )
 
     metrics = {
         "num_examples": len(rows),
-        "num_retained_examples": num_retained_examples,
-        "num_drop_prompt_over_budget": num_drop_prompt_over_budget,
         "num_candidates": len(candidate_rows),
     }
     write_jsonl(out_path, candidate_rows)
@@ -452,24 +290,16 @@ def _refresh_selected_confidence(
         row["validation_report"] = validation_report
 
 
-def validate_teacher_candidates(
+def validate_answerable_candidates(
+    rows: Sequence[Dict[str, Any]],
     *,
-    in_path: str,
-    out_path: str,
-    selected_out_path: Optional[str],
-    metrics_out: Optional[str],
     validation_cfg: ValidationConfig,
-    correctness_cfg: CorrectnessConfig = CorrectnessConfig(),
-    spec: ProtocolSpec = DEFAULT_PROTOCOL_SPEC,
-) -> Dict[str, Any]:
-    """Validate teacher-generated structured outputs and optionally select the best candidate."""
+    correctness_cfg: CorrectnessConfig,
+    spec: ProtocolSpec,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """Validate answerable teacher candidates and select the best one per example."""
 
-    if validation_cfg.semantic_decision_source not in {"full_binary", "reject_aware"}:
-        raise ValueError(f"Unsupported semantic_decision_source: {validation_cfg.semantic_decision_source}")
-
-    rows = list(read_jsonl(in_path))
     structured_judge = StructuredAnswerJudge.from_defaults() if validation_cfg.enable_semantics else None
-
     annotated_rows: List[Dict[str, Any]] = []
     num_parse_ok = 0
     num_hard_pass = 0
@@ -605,7 +435,6 @@ def validate_teacher_candidates(
 
     selected_rows = select_best_candidates(annotated_rows)
     _refresh_selected_confidence(rows=selected_rows, validation_cfg=validation_cfg, spec=spec)
-
     metrics = {
         "num_rows": len(rows),
         "num_parse_ok": num_parse_ok,
@@ -615,26 +444,17 @@ def validate_teacher_candidates(
         "num_completion_over_budget": num_completion_over_budget,
         "num_selected": len(selected_rows),
     }
-    write_jsonl(out_path, annotated_rows)
-    if selected_out_path:
-        write_jsonl(selected_out_path, selected_rows)
-    if metrics_out:
-        write_json(metrics_out, metrics)
-    return metrics
+    return annotated_rows, selected_rows, metrics
 
 
-def validate_unanswerable_teacher_candidates(
+def validate_unanswerable_candidates(
+    rows: Sequence[Dict[str, Any]],
     *,
-    in_path: str,
-    out_path: str,
-    selected_out_path: Optional[str],
-    metrics_out: Optional[str],
     validation_cfg: ValidationConfig,
-    spec: ProtocolSpec = DEFAULT_PROTOCOL_SPEC,
-) -> Dict[str, Any]:
-    """Validate unanswerable teacher candidates with unanswerable-specific rules."""
+    spec: ProtocolSpec,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """Validate unanswerable teacher candidates using the simplified refusal path."""
 
-    rows = list(read_jsonl(in_path))
     annotated_rows: List[Dict[str, Any]] = []
     num_parse_ok = 0
     num_hard_pass = 0
@@ -716,7 +536,63 @@ def validate_unanswerable_teacher_candidates(
         "num_completion_over_budget": num_completion_over_budget,
         "num_selected": len(selected_rows),
     }
-    write_jsonl(out_path, annotated_rows)
+    return annotated_rows, selected_rows, metrics
+
+
+def validate_mixed_teacher_candidates(
+    *,
+    in_path: str,
+    out_path: str,
+    selected_out_path: Optional[str],
+    metrics_out: Optional[str],
+    validation_cfg: ValidationConfig,
+    correctness_cfg: CorrectnessConfig = CorrectnessConfig(),
+    spec: ProtocolSpec = DEFAULT_PROTOCOL_SPEC,
+) -> Dict[str, Any]:
+    """Validate mixed teacher candidates by dispatching on answerability_label."""
+
+    if validation_cfg.semantic_decision_source not in {"full_binary", "reject_aware"}:
+        raise ValueError(f"Unsupported semantic_decision_source: {validation_cfg.semantic_decision_source}")
+
+    rows = [dict(row) for row in read_jsonl(in_path)]
+    indexed_rows = [{"__input_order": idx, **row} for idx, row in enumerate(rows)]
+
+    answerable_rows = [row for row in indexed_rows if str(row.get("answerability_label") or "") == "answerable"]
+    unanswerable_rows = [row for row in indexed_rows if str(row.get("answerability_label") or "") == "unanswerable"]
+    unsupported_labels = [
+        str(row.get("answerability_label") or "")
+        for row in indexed_rows
+        if str(row.get("answerability_label") or "") not in {"answerable", "unanswerable"}
+    ]
+    if unsupported_labels:
+        raise ValueError(f"Unsupported answerability labels encountered: {sorted(set(unsupported_labels))}")
+
+    answerable_annotated, answerable_selected, answerable_metrics = validate_answerable_candidates(
+        answerable_rows,
+        validation_cfg=validation_cfg,
+        correctness_cfg=correctness_cfg,
+        spec=spec,
+    )
+    unanswerable_annotated, unanswerable_selected, unanswerable_metrics = validate_unanswerable_candidates(
+        unanswerable_rows,
+        validation_cfg=validation_cfg,
+        spec=spec,
+    )
+
+    merged_annotated = sorted(answerable_annotated + unanswerable_annotated, key=lambda row: int(row["__input_order"]))
+    for row in merged_annotated:
+        row.pop("__input_order", None)
+    selected_rows = answerable_selected + unanswerable_selected
+    for row in selected_rows:
+        row.pop("__input_order", None)
+
+    metrics = {
+        "num_rows": len(rows),
+        "num_selected": len(selected_rows),
+        "answerable": answerable_metrics,
+        "unanswerable": unanswerable_metrics,
+    }
+    write_jsonl(out_path, merged_annotated)
     if selected_out_path:
         write_jsonl(selected_out_path, selected_rows)
     if metrics_out:

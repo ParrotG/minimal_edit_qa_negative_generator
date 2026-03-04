@@ -7,10 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from grounded_qa.config import ValidationConfig
-from grounded_qa.workflow import validate_unanswerable_teacher_candidates
+from grounded_qa.workflow import validate_mixed_teacher_candidates
+from qa_checks.source_prefilter import prefilter_mixed_examples
 from qa_checks.unanswerable_prefilter import build_reference_answer_hypothesis, check_reference_answer_unsupported
+from qa_data.construct import ConstructionConfig
 from qa_data.records import ContextDocument, QaExample, SupportingSentence
-from qa_data.unanswerable import UnanswerableBuildConfig, build_unanswerable_from_answerable_example
+from qa_data.tagging import AnswerabilitySplitConfig, DataSplitConfig, assign_answerability_split_name, assign_data_split_name
+from qa_data.unanswerable import UnanswerableBuildConfig, build_examples_from_tagged_row, build_unanswerable_from_answerable_example
 from qa_protocol.prompting import build_infer_prompt, build_teacher_prompt
 from sft_trainer.formatting import build_sft_record
 
@@ -19,8 +22,10 @@ class FakePrefilterJudge:
     def __init__(self, decision: str, margin: float) -> None:
         self.decision = decision
         self.margin = margin
+        self.rows = []
 
     def judge(self, rows):
+        self.rows.extend(rows)
         return (
             [
                 {
@@ -47,54 +52,131 @@ def _read_jsonl(path: Path):
         return [json.loads(line) for line in handle if line.strip()]
 
 
-class UnanswerableBuilderTests(unittest.TestCase):
-    def test_build_unanswerable_replaces_support_with_neighbor_sentence(self) -> None:
-        example = QaExample(
-            id="s1:answerable",
-            source_id="s1",
-            variant_id="answerable",
-            split="train_sft_raw",
-            question="Who founded Acme?",
-            knowledge="Doc1: Support sentence one.\n\nDoc2: Support sentence two.",
-            reference_answer="Alice",
-            answerability_label="answerable",
-            difficulty="medium",
-            supporting_sentences=(
-                SupportingSentence(
-                    title="Doc1",
-                    sent_id=1,
-                    sentence="Support sentence one.",
-                    window_sentences=("Neighbor sentence.", "Support sentence one."),
-                    window_text="Doc1: Support sentence one.",
-                ),
-                SupportingSentence(
-                    title="Doc2",
-                    sent_id=0,
-                    sentence="Support sentence two.",
-                    window_sentences=("Support sentence two.",),
-                    window_text="Doc2: Support sentence two.",
-                ),
+def _example() -> QaExample:
+    return QaExample(
+        id="s1:answerable",
+        source_id="s1",
+        variant_id="answerable",
+        data_split="train_sft_raw",
+        answerability_split="both",
+        question="Who founded Acme?",
+        knowledge="Doc1: Support sentence one.\n\nDoc2: Support sentence two.",
+        reference_answer="Alice",
+        answerability_label="answerable",
+        difficulty="medium",
+        supporting_sentences=(
+            SupportingSentence(
+                title="Doc1",
+                sent_id=1,
+                sentence="Support sentence one.",
+                window_sentences=("Neighbor sentence.", "Support sentence one."),
+                window_text="Doc1: Support sentence one.",
             ),
-            context_documents=(
-                ContextDocument(title="Doc1", sentences=("Intro.", "Support sentence one.", "Neighbor sentence.")),
-                ContextDocument(title="Doc2", sentences=("Support sentence two.", "Tail.")),
+            SupportingSentence(
+                title="Doc2",
+                sent_id=0,
+                sentence="Support sentence two.",
+                window_sentences=("Support sentence two.",),
+                window_text="Doc2: Support sentence two.",
             ),
-            metadata={},
+        ),
+        context_documents=(
+            ContextDocument(title="Doc1", sentences=("Intro.", "Support sentence one.", "Neighbor sentence.")),
+            ContextDocument(title="Doc2", sentences=("Support sentence two.", "Tail.")),
+        ),
+        metadata={},
+    )
+
+
+class TaggingTests(unittest.TestCase):
+    def test_tagging_uses_two_independent_salted_assignments(self) -> None:
+        source_id = "hotpot-123"
+        data_split = assign_data_split_name(source_id, DataSplitConfig())
+        answerability_split = assign_answerability_split_name(source_id, AnswerabilitySplitConfig())
+        self.assertIn(data_split, {"validation", "test", "train_sft_raw", "train_dpo_raw"})
+        self.assertIn(answerability_split, {"answerable", "unanswerable", "both"})
+        self.assertNotEqual(
+            assign_data_split_name(source_id, DataSplitConfig(hash_salt="data_split")),
+            assign_data_split_name(source_id, DataSplitConfig(hash_salt="different_data_split")),
         )
 
-        built = build_unanswerable_from_answerable_example(example, UnanswerableBuildConfig(seed=7))
+
+class UnanswerableBuilderTests(unittest.TestCase):
+    def test_build_unanswerable_replaces_support_with_neighbor_sentence(self) -> None:
+        example = _example()
+        built = build_unanswerable_from_answerable_example(
+            example,
+            UnanswerableBuildConfig(seed=7),
+            origin_track="paired_answerable",
+            raw_source_id=example.source_id,
+            data_split=example.data_split,
+            answerability_split=example.answerability_split,
+        )
         self.assertIsNotNone(built)
         self.assertEqual(built.answerability_label, "unanswerable")
         self.assertNotEqual(built.knowledge, example.knowledge)
-        self.assertIn("origin_track", built.metadata)
+        self.assertEqual(built.data_split, "train_sft_raw")
+        self.assertEqual(built.answerability_split, "both")
         self.assertIn("replacement_sentences", built.metadata["negative_strategy"])
+
+    def test_build_examples_from_tagged_row_expands_both_to_two_examples(self) -> None:
+        row = {
+            "_id": "s2",
+            "question": "Who founded Acme?",
+            "answer": "Alice",
+            "type": "bridge",
+            "level": "medium",
+            "data_split": "train_sft_raw",
+            "answerability_split": "both",
+            "context": {
+                "title": ["Doc1", "Doc2"],
+                "sentences": [["Intro.", "Support sentence one.", "Neighbor sentence."], ["Support sentence two.", "Tail."]],
+            },
+            "supporting_facts": {"title": ["Doc1", "Doc2"], "sent_id": [1, 0]},
+        }
+        built = build_examples_from_tagged_row(row, ConstructionConfig(), UnanswerableBuildConfig(seed=7))
+        self.assertEqual(len(built), 2)
+        self.assertEqual({item.answerability_label for item in built}, {"answerable", "unanswerable"})
 
 
 class UnanswerablePrefilterTests(unittest.TestCase):
     def test_reference_answer_hypothesis_uses_fixed_template(self) -> None:
         self.assertEqual(build_reference_answer_hypothesis("Alpha"), "The answer is Alpha.")
 
-    def test_prefilter_keeps_only_full_binary_no(self) -> None:
+    def test_prefilter_mixed_examples_only_checks_unanswerable_rows(self) -> None:
+        rows = [
+            {
+                "id": "a",
+                "question": "Q1",
+                "knowledge": "K1",
+                "reference_answer": "A1",
+                "answerability_label": "answerable",
+                "metadata": {},
+            },
+            {
+                "id": "u",
+                "question": "Q2",
+                "knowledge": "K2",
+                "reference_answer": "A2",
+                "answerability_label": "unanswerable",
+                "metadata": {},
+            },
+        ]
+        judge = FakePrefilterJudge(decision="no", margin=-0.4)
+        with patch("qa_checks.source_prefilter.count_text_tokens", side_effect=lambda text, _: len(str(text).split())):
+            kept, metrics = prefilter_mixed_examples(
+                rows,
+                tokenizer_name="dummy",
+                max_prompt_tokens=512,
+                enable_unanswerable_nli=True,
+                judge=judge,
+            )
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(metrics["num_unanswerable_checked"], 1)
+        self.assertEqual(len(judge.rows), 1)
+        self.assertEqual(judge.rows[0]["question"], "Q2")
+
+    def test_check_reference_answer_unsupported_keeps_only_full_binary_no(self) -> None:
         keep_report = check_reference_answer_unsupported(
             knowledge="K",
             question="Q",
@@ -122,9 +204,9 @@ class UnanswerablePromptTests(unittest.TestCase):
         self.assertIn("missing, ambiguous, or contradictory", prompt)
 
 
-class UnanswerableValidateTests(unittest.TestCase):
+class MixedValidateTests(unittest.TestCase):
     @patch("grounded_qa.workflow.count_text_tokens", side_effect=lambda text, _: len(str(text).split()))
-    def test_validate_unanswerable_selects_first_valid_candidate(self, _mock_tokens) -> None:
+    def test_validate_mixed_routes_unanswerable_without_semantics(self, _mock_tokens) -> None:
         rows = [
             {
                 "id": "u1",
@@ -168,7 +250,7 @@ class UnanswerableValidateTests(unittest.TestCase):
             selected_path = Path(tmpdir) / "selected.jsonl"
             _write_jsonl(in_path, rows)
 
-            validate_unanswerable_teacher_candidates(
+            validate_mixed_teacher_candidates(
                 in_path=str(in_path),
                 out_path=str(out_path),
                 selected_out_path=str(selected_path),
@@ -188,9 +270,10 @@ class MixedSftPackingTests(unittest.TestCase):
         row = {
             "id": "u2",
             "source_id": "u2",
-            "split": "train_sft_raw",
+            "data_split": "train_sft_raw",
             "knowledge": "Knowledge.",
             "question": "Question?",
+            "answerability_split": "unanswerable",
             "parsed_output": {
                 "answerability": "unanswerable",
                 "evidence": [],
@@ -206,6 +289,7 @@ class MixedSftPackingTests(unittest.TestCase):
 
         record = build_sft_record(row=row, prompt_style="infer_v1")
         self.assertIsNotNone(record)
+        self.assertEqual(record["data_split"], "train_sft_raw")
         self.assertEqual(record["target_structured"]["confidence"], "low")
 
 

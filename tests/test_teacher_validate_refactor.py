@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from grounded_qa.config import ValidationConfig
-from grounded_qa.workflow import validate_teacher_candidates
+from grounded_qa.workflow import validate_mixed_teacher_candidates
 from qa_judge.structured import StructuredAnswerJudge
 from qa_protocol import Answerability, ConfidenceLevel, EvidenceQuote, StructuredQaOutput, parse_structured_output
 
@@ -214,7 +214,7 @@ class ValidateWorkflowTests(unittest.TestCase):
                 }
             )
             with patch("grounded_qa.workflow.StructuredAnswerJudge.from_defaults", return_value=fake_judge):
-                validate_teacher_candidates(
+                validate_mixed_teacher_candidates(
                     in_path=str(in_path),
                     out_path=str(out_path),
                     selected_out_path=str(selected_path),
@@ -263,7 +263,7 @@ class ValidateWorkflowTests(unittest.TestCase):
 
             fake_judge = FakeStructuredJudge({"Q-neg": (0.2, "no")})
             with patch("grounded_qa.workflow.StructuredAnswerJudge.from_defaults", return_value=fake_judge):
-                validate_teacher_candidates(
+                validate_mixed_teacher_candidates(
                     in_path=str(in_path),
                     out_path=str(out_path),
                     selected_out_path=None,
@@ -274,7 +274,7 @@ class ValidateWorkflowTests(unittest.TestCase):
             self.assertTrue(validated[0]["validation_report"]["hard_pass"])
 
             with patch("grounded_qa.workflow.StructuredAnswerJudge.from_defaults", return_value=fake_judge):
-                validate_teacher_candidates(
+                validate_mixed_teacher_candidates(
                     in_path=str(in_path),
                     out_path=str(out_path),
                     selected_out_path=None,

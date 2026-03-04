@@ -30,7 +30,8 @@ class QaExample:
     id: str
     source_id: str
     variant_id: str
-    split: Optional[str]
+    data_split: Optional[str]
+    answerability_split: Optional[str]
     question: str
     knowledge: str
     reference_answer: str
