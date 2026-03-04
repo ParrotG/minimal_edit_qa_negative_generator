@@ -12,7 +12,7 @@ from qa_checks import (
     check_evidence_against_supporting_facts,
     check_evidence_quotes,
     check_protocol_constraints,
-    evaluate_structured_semantics,
+    evaluate_structured_semantics_batch,
     prefilter_mixed_examples,
     score_validation_report,
     select_best_candidates,
@@ -42,6 +42,7 @@ from qa_protocol import (
     DEFAULT_PROTOCOL_SPEC,
     build_teacher_prompt,
     count_text_tokens,
+    count_text_tokens_batch,
     parse_structured_output,
     to_canonical_json,
     validate_structured_payload,
@@ -380,12 +381,8 @@ def validate_answerable_candidates(
     """Validate answerable teacher candidates and select the best one per example."""
 
     structured_judge = StructuredAnswerJudge.from_defaults() if validation_cfg.enable_semantics else None
-    annotated_rows: List[Dict[str, Any]] = []
+    prepared_items: List[Dict[str, Any]] = []
     num_parse_ok = 0
-    num_hard_pass = 0
-    num_answerability_match = 0
-    num_semantic_negative = 0
-    num_completion_over_budget = 0
 
     for row in rows:
         parse_result = parse_structured_output(str(row.get("raw_output") or ""), spec=spec)
@@ -393,22 +390,16 @@ def validate_answerable_candidates(
         evidence_report = EvidenceCheckReport(ok=False, issues=["Parsing failed."])
         support_evidence_report = EvidenceCheckReport(ok=True, issues=[])
         correctness_report: CorrectnessCheckReport | None = None
-        semantics_report = _build_empty_semantics_report()
         answerability_match = None
-        hard_fail_reasons: List[str] = list(parse_result.errors)
-        soft_metrics: Dict[str, float | bool | None] = {}
-        completion_tokens = None
-        completion_over_budget = False
         parsed_payload = None
         canonical_output = None
+        should_run_semantics = False
 
         if parse_result.ok and parse_result.parsed is not None:
             num_parse_ok += 1
             protocol_report = check_protocol_constraints(parse_result.parsed, spec=spec)
             parsed_payload = parse_result.parsed.model_dump(mode="json")
             canonical_output = to_canonical_json(parse_result.parsed, spec=spec)
-            completion_tokens = count_text_tokens(canonical_output, validation_cfg.tokenizer_name)
-            completion_over_budget = completion_tokens > validation_cfg.max_completion_tokens
 
             evidence_report = check_evidence_quotes(
                 output=parse_result.parsed,
@@ -425,7 +416,6 @@ def validate_answerable_candidates(
             gold_answerability = str(row.get("answerability_label") or "").strip()
             if gold_answerability:
                 answerability_match = parse_result.parsed.answerability.value == gold_answerability
-                num_answerability_match += int(bool(answerability_match))
 
             if parse_result.parsed.answerability == Answerability.ANSWERABLE and str(row.get("reference_answer") or "").strip():
                 correctness_report = check_answer_correctness(
@@ -433,30 +423,98 @@ def validate_answerable_candidates(
                     reference_answer=str(row.get("reference_answer") or ""),
                     cfg=correctness_cfg,
                 )
+            should_run_semantics = bool(
+                validation_cfg.enable_semantics
+                and protocol_report.ok
+                and parse_result.parsed.answerability == Answerability.ANSWERABLE
+                and len(parse_result.parsed.evidence) >= 1
+            )
 
-            if validation_cfg.enable_semantics:
-                semantics_report = evaluate_structured_semantics(
-                    question=str(row.get("question") or ""),
-                    knowledge=str(row.get("knowledge") or ""),
-                    output=parse_result.parsed,
-                    judge=structured_judge,
-                    decision_source=validation_cfg.semantic_decision_source,
-                )
-                if semantics_report.decision == "no":
-                    num_semantic_negative += 1
-
-            soft_metrics = {
-                "semantic_margin": semantics_report.margin,
-                "supporting_fact_match_rate": evidence_report.supporting_fact_match_rate,
-                "outside_supporting_fact_count": float(evidence_report.outside_supporting_fact_count),
-                "correctness_token_f1": None if correctness_report is None else correctness_report.token_f1,
-                "evidence_count": float(protocol_report.evidence_count),
+        prepared_items.append(
+            {
+                "row": row,
+                "parse_result": parse_result,
+                "protocol_report": protocol_report,
+                "evidence_report": evidence_report,
+                "support_evidence_report": support_evidence_report,
+                "correctness_report": correctness_report,
+                "answerability_match": answerability_match,
+                "parsed_payload": parsed_payload,
+                "canonical_output": canonical_output,
+                "should_run_semantics": should_run_semantics,
+                "completion_tokens": None,
+                "completion_over_budget": False,
+                "semantics_report": _build_empty_semantics_report(),
             }
+        )
 
+    token_indices = [idx for idx, item in enumerate(prepared_items) if item["canonical_output"] is not None]
+    if token_indices:
+        token_counts = count_text_tokens_batch(
+            [prepared_items[idx]["canonical_output"] for idx in token_indices],
+            tokenizer_name=validation_cfg.tokenizer_name,
+        )
+        for idx, token_count in zip(token_indices, token_counts):
+            prepared_items[idx]["completion_tokens"] = int(token_count)
+            prepared_items[idx]["completion_over_budget"] = int(token_count) > validation_cfg.max_completion_tokens
+
+    semantic_indices = [idx for idx, item in enumerate(prepared_items) if item["should_run_semantics"]]
+    if semantic_indices:
+        semantic_reports = evaluate_structured_semantics_batch(
+            rows=[
+                {
+                    "question": str(prepared_items[idx]["row"].get("question") or ""),
+                    "knowledge": str(prepared_items[idx]["row"].get("knowledge") or ""),
+                    "parsed_output": prepared_items[idx]["parsed_payload"],
+                }
+                for idx in semantic_indices
+            ],
+            judge=structured_judge,
+            decision_source=validation_cfg.semantic_decision_source,
+        )
+        for idx, semantics_report in zip(semantic_indices, semantic_reports):
+            prepared_items[idx]["semantics_report"] = semantics_report
+
+    annotated_rows: List[Dict[str, Any]] = []
+    num_hard_pass = 0
+    num_answerability_match = 0
+    num_semantic_negative = 0
+    num_completion_over_budget = 0
+
+    for item in prepared_items:
+        row = item["row"]
+        parse_result = item["parse_result"]
+        protocol_report = item["protocol_report"]
+        evidence_report = item["evidence_report"]
+        support_evidence_report = item["support_evidence_report"]
+        correctness_report = item["correctness_report"]
+        answerability_match = item["answerability_match"]
+        parsed_payload = item["parsed_payload"]
+        canonical_output = item["canonical_output"]
+        completion_tokens = item["completion_tokens"]
+        completion_over_budget = bool(item["completion_over_budget"])
+        semantics_report = item["semantics_report"]
+
+        hard_fail_reasons: List[str] = list(parse_result.errors)
+        if answerability_match is not None:
+            num_answerability_match += int(bool(answerability_match))
+        if completion_over_budget:
+            num_completion_over_budget += 1
+        if semantics_report.decision == "no":
+            num_semantic_negative += 1
+
+        soft_metrics: Dict[str, float | bool | None] = {
+            "semantic_margin": semantics_report.margin,
+            "supporting_fact_match_rate": evidence_report.supporting_fact_match_rate,
+            "outside_supporting_fact_count": float(evidence_report.outside_supporting_fact_count),
+            "correctness_token_f1": None if correctness_report is None else correctness_report.token_f1,
+            "evidence_count": float(protocol_report.evidence_count),
+        }
+
+        if parse_result.ok and parse_result.parsed is not None:
             if not protocol_report.ok:
                 hard_fail_reasons.extend(protocol_report.issues)
             if completion_over_budget:
-                num_completion_over_budget += 1
                 hard_fail_reasons.append(
                     f"Canonical completion exceeds max_completion_tokens={validation_cfg.max_completion_tokens}."
                 )
@@ -502,7 +560,6 @@ def validate_answerable_candidates(
             issues=issues,
         )
         report.selection_score = score_validation_report(asdict(report))
-
         annotated_rows.append(
             {
                 **row,
@@ -535,20 +592,14 @@ def validate_unanswerable_candidates(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     """Validate unanswerable teacher candidates using the simplified refusal path."""
 
-    annotated_rows: List[Dict[str, Any]] = []
+    prepared_items: List[Dict[str, Any]] = []
     num_parse_ok = 0
-    num_hard_pass = 0
-    num_answerability_match = 0
-    num_completion_over_budget = 0
 
     for row in rows:
         parse_result = parse_structured_output(str(row.get("raw_output") or ""), spec=spec)
         protocol_report = ProtocolCheckReport(ok=False, issues=["Parsing failed."])
         evidence_report = EvidenceCheckReport(ok=True, issues=[])
         answerability_match = None
-        hard_fail_reasons: List[str] = list(parse_result.errors)
-        completion_tokens = None
-        completion_over_budget = False
         parsed_payload = None
         canonical_output = None
 
@@ -557,20 +608,61 @@ def validate_unanswerable_candidates(
             protocol_report = check_protocol_constraints(parse_result.parsed, spec=spec)
             parsed_payload = parse_result.parsed.model_dump(mode="json")
             canonical_output = to_canonical_json(parse_result.parsed, spec=spec)
-            completion_tokens = count_text_tokens(canonical_output, validation_cfg.tokenizer_name)
-            completion_over_budget = completion_tokens > validation_cfg.max_completion_tokens
 
             gold_answerability = str(row.get("answerability_label") or "").strip()
             if gold_answerability:
                 answerability_match = parse_result.parsed.answerability.value == gold_answerability
-                num_answerability_match += int(bool(answerability_match))
+        prepared_items.append(
+            {
+                "row": row,
+                "parse_result": parse_result,
+                "protocol_report": protocol_report,
+                "evidence_report": evidence_report,
+                "answerability_match": answerability_match,
+                "parsed_payload": parsed_payload,
+                "canonical_output": canonical_output,
+                "completion_tokens": None,
+                "completion_over_budget": False,
+            }
+        )
 
+    token_indices = [idx for idx, item in enumerate(prepared_items) if item["canonical_output"] is not None]
+    if token_indices:
+        token_counts = count_text_tokens_batch(
+            [prepared_items[idx]["canonical_output"] for idx in token_indices],
+            tokenizer_name=validation_cfg.tokenizer_name,
+        )
+        for idx, token_count in zip(token_indices, token_counts):
+            prepared_items[idx]["completion_tokens"] = int(token_count)
+            prepared_items[idx]["completion_over_budget"] = int(token_count) > validation_cfg.max_completion_tokens
+
+    annotated_rows: List[Dict[str, Any]] = []
+    num_hard_pass = 0
+    num_answerability_match = 0
+    num_completion_over_budget = 0
+    for item in prepared_items:
+        row = item["row"]
+        parse_result = item["parse_result"]
+        protocol_report = item["protocol_report"]
+        evidence_report = item["evidence_report"]
+        answerability_match = item["answerability_match"]
+        parsed_payload = item["parsed_payload"]
+        canonical_output = item["canonical_output"]
+        completion_tokens = item["completion_tokens"]
+        completion_over_budget = bool(item["completion_over_budget"])
+        hard_fail_reasons: List[str] = list(parse_result.errors)
+
+        if answerability_match is not None:
+            num_answerability_match += int(bool(answerability_match))
+        if completion_over_budget:
+            num_completion_over_budget += 1
+
+        if parse_result.ok and parse_result.parsed is not None:
             if not protocol_report.ok:
                 hard_fail_reasons.extend(protocol_report.issues)
             if answerability_match is False:
                 hard_fail_reasons.append("Predicted answerability does not match the target label.")
             if completion_over_budget:
-                num_completion_over_budget += 1
                 hard_fail_reasons.append(
                     f"Canonical completion exceeds max_completion_tokens={validation_cfg.max_completion_tokens}."
                 )

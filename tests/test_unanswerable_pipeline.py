@@ -291,8 +291,9 @@ class UnanswerablePromptTests(unittest.TestCase):
 
 
 class MixedValidateTests(unittest.TestCase):
+    @patch("grounded_qa.workflow.count_text_tokens_batch", side_effect=lambda texts, tokenizer_name: [len(str(text).split()) for text in texts])
     @patch("grounded_qa.workflow.count_text_tokens", side_effect=lambda text, _: len(str(text).split()))
-    def test_validate_mixed_routes_unanswerable_without_semantics(self, _mock_tokens) -> None:
+    def test_validate_mixed_routes_unanswerable_without_semantics(self, _mock_tokens, _mock_batch_tokens) -> None:
         rows = [
             {
                 "id": "u1",
@@ -350,8 +351,9 @@ class MixedValidateTests(unittest.TestCase):
             self.assertIsNone(selected[0]["validation_report"]["correctness"])
             self.assertIsNone(selected[0]["validation_report"]["semantics"])
 
+    @patch("grounded_qa.workflow.count_text_tokens_batch", side_effect=lambda texts, tokenizer_name: [len(str(text).split()) for text in texts])
     @patch("grounded_qa.workflow.count_text_tokens", side_effect=lambda text, _: len(str(text).split()))
-    def test_validate_mixed_derives_unanswerable_confidence_from_prefilter_score(self, _mock_tokens) -> None:
+    def test_validate_mixed_derives_unanswerable_confidence_from_prefilter_score(self, _mock_tokens, _mock_batch_tokens) -> None:
         rows = [
             {
                 "id": "u1",
@@ -496,8 +498,9 @@ class TeacherGenerateTests(unittest.TestCase):
 
 
 class MixedValidateGenerationErrorTests(unittest.TestCase):
+    @patch("grounded_qa.workflow.count_text_tokens_batch", side_effect=lambda texts, tokenizer_name: [len(str(text).split()) for text in texts])
     @patch("grounded_qa.workflow.count_text_tokens", side_effect=lambda text, _: len(str(text).split()))
-    def test_validate_mixed_removes_generation_error_rows(self, _mock_tokens) -> None:
+    def test_validate_mixed_removes_generation_error_rows(self, _mock_tokens, _mock_batch_tokens) -> None:
         rows = [
             {
                 "id": "ok1",

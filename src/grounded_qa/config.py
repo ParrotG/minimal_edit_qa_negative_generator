@@ -67,7 +67,7 @@ class ValidationConfig:
     """Validation defaults for teacher candidates."""
 
     enable_semantics: bool = True
-    semantic_drop_by_nli: bool = False
+    semantic_drop_by_nli: bool = True
     semantic_decision_source: str = "full_binary"
     tokenizer_name: str = "Qwen/Qwen3-0.6B"
     max_completion_tokens: int = 512

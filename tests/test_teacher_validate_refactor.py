@@ -37,8 +37,10 @@ class FakeAnswerJudge:
 class FakeStructuredJudge:
     def __init__(self, decisions_by_question):
         self.decisions_by_question = decisions_by_question
+        self.seen_batch_sizes = []
 
     def judge_rows(self, rows, *, decision_source="full_binary"):
+        self.seen_batch_sizes.append(len(rows))
         judged = []
         for row in rows:
             question = str(row["question"])
@@ -138,8 +140,9 @@ class StructuredJudgeTests(unittest.TestCase):
 
 
 class ValidateWorkflowTests(unittest.TestCase):
+    @patch("grounded_qa.workflow.count_text_tokens_batch", side_effect=lambda texts, tokenizer_name: [len(str(text).split()) for text in texts])
     @patch("grounded_qa.workflow.count_text_tokens", side_effect=lambda text, _: len(str(text).split()))
-    def test_validate_keeps_soft_supporting_fact_penalty_and_assigns_quantile_confidence(self, _mock_tokens) -> None:
+    def test_validate_keeps_soft_supporting_fact_penalty_and_assigns_quantile_confidence(self, _mock_tokens, _mock_batch_tokens) -> None:
         rows = [
             {
                 "id": "a",
@@ -233,9 +236,11 @@ class ValidateWorkflowTests(unittest.TestCase):
             self.assertEqual(by_id["c"]["validation_report"]["derived_confidence"], "high")
             self.assertEqual(by_id["c"]["parsed_output"]["confidence"], "high")
             self.assertEqual(len(validated), 3)
+            self.assertEqual(fake_judge.seen_batch_sizes, [3])
 
+    @patch("grounded_qa.workflow.count_text_tokens_batch", side_effect=lambda texts, tokenizer_name: [len(str(text).split()) for text in texts])
     @patch("grounded_qa.workflow.count_text_tokens", side_effect=lambda text, _: len(str(text).split()))
-    def test_validate_semantic_negative_only_drops_when_enabled(self, _mock_tokens) -> None:
+    def test_validate_semantic_negative_only_drops_when_enabled(self, _mock_tokens, _mock_batch_tokens) -> None:
         row = {
             "id": "neg",
             "source_id": "neg",
@@ -284,6 +289,46 @@ class ValidateWorkflowTests(unittest.TestCase):
                         semantic_drop_by_nli=True,
                         semantic_decision_source="full_binary",
                     ),
+                )
+            validated = _read_jsonl(out_path)
+            self.assertFalse(validated[0]["validation_report"]["hard_pass"])
+
+    @patch("grounded_qa.workflow.count_text_tokens_batch", side_effect=lambda texts, tokenizer_name: [len(str(text).split()) for text in texts])
+    @patch("grounded_qa.workflow.count_text_tokens", side_effect=lambda text, _: len(str(text).split()))
+    def test_validation_config_defaults_to_semantic_drop(self, _mock_tokens, _mock_batch_tokens) -> None:
+        row = {
+            "id": "neg-default",
+            "source_id": "neg-default",
+            "candidate_id": 0,
+            "question": "Q-default",
+            "knowledge": "Omega is the capital of Country O.",
+            "reference_answer": "Omega",
+            "answerability_label": "answerable",
+            "supporting_sentences": [{"sentence": "Omega is the capital of Country O."}],
+            "raw_output": json.dumps(
+                {
+                    "answerability": "answerable",
+                    "evidence": [{"quote": "Omega is the capital of Country O."}],
+                    "rationale": "The evidence names Omega as the capital.",
+                    "answer": "Omega",
+                    "confidence": "high",
+                }
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path = Path(tmpdir) / "teacher.jsonl"
+            out_path = Path(tmpdir) / "validated.jsonl"
+            _write_jsonl(in_path, [row])
+
+            fake_judge = FakeStructuredJudge({"Q-default": (0.2, "no")})
+            with patch("grounded_qa.workflow.StructuredAnswerJudge.from_defaults", return_value=fake_judge):
+                validate_mixed_teacher_candidates(
+                    in_path=str(in_path),
+                    out_path=str(out_path),
+                    selected_out_path=None,
+                    metrics_out=None,
+                    validation_cfg=ValidationConfig(enable_semantics=True),
                 )
             validated = _read_jsonl(out_path)
             self.assertFalse(validated[0]["validation_report"]["hard_pass"])
