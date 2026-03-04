@@ -6,10 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from grounded_qa.config import ValidationConfig
-from grounded_qa.workflow import validate_mixed_teacher_candidates
+from grounded_qa.config import TeacherGenerationConfig, ValidationConfig
+from grounded_qa.workflow import generate_teacher_candidates, validate_mixed_teacher_candidates
 from qa_checks.source_prefilter import prefilter_mixed_examples
-from qa_checks.unanswerable_prefilter import build_reference_answer_hypothesis, check_reference_answer_unsupported
+from qa_checks.unanswerable_prefilter import (
+    build_reference_answer_hypothesis,
+    check_reference_answer_unsupported,
+    flip_yes_no_answer,
+)
 from qa_data.construct import ConstructionConfig
 from qa_data.records import ContextDocument, QaExample, SupportingSentence
 from qa_data.tagging import AnswerabilitySplitConfig, DataSplitConfig, assign_answerability_split_name, assign_data_split_name
@@ -19,9 +23,10 @@ from sft_trainer.formatting import build_sft_record
 
 
 class FakePrefilterJudge:
-    def __init__(self, decision: str, margin: float) -> None:
+    def __init__(self, decision: str, margin: float, decisions_by_answer: dict[str, tuple[str, float]] | None = None) -> None:
         self.decision = decision
         self.margin = margin
+        self.decisions_by_answer = decisions_by_answer or {}
         self.rows = []
 
     def judge(self, rows):
@@ -31,14 +36,25 @@ class FakePrefilterJudge:
                 {
                     **row,
                     "judge": {
-                        "margin": self.margin,
-                        "full_binary": {"decision": self.decision},
+                        "margin": self.decisions_by_answer.get(str(row.get("answer") or ""), (self.decision, self.margin))[1],
+                        "full_binary": {
+                            "decision": self.decisions_by_answer.get(str(row.get("answer") or ""), (self.decision, self.margin))[0]
+                        },
                     },
                 }
                 for row in rows
             ],
             {"num_rows": float(len(rows))},
         )
+
+
+class FakeGenerator:
+    def __init__(self, *args, **kwargs) -> None:
+        self.prompts = []
+
+    def generate_many(self, prompts):
+        self.prompts.extend(prompts)
+        return [json.dumps({"prompt_index": idx}) for idx, _ in enumerate(prompts)]
 
 
 def _write_jsonl(path: Path, rows) -> None:
@@ -142,6 +158,9 @@ class UnanswerableBuilderTests(unittest.TestCase):
 class UnanswerablePrefilterTests(unittest.TestCase):
     def test_reference_answer_hypothesis_uses_fixed_template(self) -> None:
         self.assertEqual(build_reference_answer_hypothesis("Alpha"), "The answer is Alpha.")
+        self.assertEqual(flip_yes_no_answer("yes"), "no")
+        self.assertEqual(flip_yes_no_answer("No"), "yes")
+        self.assertIsNone(flip_yes_no_answer("Alice"))
 
     def test_prefilter_mixed_examples_only_checks_unanswerable_rows(self) -> None:
         rows = [
@@ -191,6 +210,27 @@ class UnanswerablePrefilterTests(unittest.TestCase):
         )
         self.assertTrue(keep_report.keep)
         self.assertFalse(drop_report.keep)
+
+    def test_yes_no_prefilter_requires_original_and_flipped_to_be_negative(self) -> None:
+        judge = FakePrefilterJudge(
+            decision="no",
+            margin=-0.3,
+            decisions_by_answer={
+                "The answer is yes.": ("no", -0.6),
+                "The answer is no.": ("yes", 0.2),
+            },
+        )
+        report = check_reference_answer_unsupported(
+            knowledge="K",
+            question="Q",
+            reference_answer="yes",
+            judge=judge,
+        )
+        self.assertFalse(report.keep)
+        self.assertTrue(report.used_flipped_check)
+        self.assertEqual(report.full_binary_decision, "no")
+        self.assertEqual(report.flipped_full_binary_decision, "yes")
+        self.assertAlmostEqual(report.score, (-0.6 + 0.2) / 2.0)
 
 
 class UnanswerablePromptTests(unittest.TestCase):
@@ -263,6 +303,110 @@ class MixedValidateTests(unittest.TestCase):
             self.assertEqual(selected[0]["candidate_id"], 0)
             self.assertIsNone(selected[0]["validation_report"]["correctness"])
             self.assertIsNone(selected[0]["validation_report"]["semantics"])
+
+    @patch("grounded_qa.workflow.count_text_tokens", side_effect=lambda text, _: len(str(text).split()))
+    def test_validate_mixed_derives_unanswerable_confidence_from_prefilter_score(self, _mock_tokens) -> None:
+        rows = [
+            {
+                "id": "u1",
+                "source_id": "u1",
+                "candidate_id": 0,
+                "question": "Question 1?",
+                "knowledge": "Knowledge 1.",
+                "answerability_label": "unanswerable",
+                "metadata": {"nli_prefilter": {"score": -0.8}},
+                "raw_output": json.dumps(
+                    {
+                        "answerability": "unanswerable",
+                        "evidence": [],
+                        "rationale": "The key fact is missing.",
+                        "answer": "I don't know based on the provided knowledge.",
+                        "confidence": "low",
+                    }
+                ),
+            },
+            {
+                "id": "u2",
+                "source_id": "u2",
+                "candidate_id": 0,
+                "question": "Question 2?",
+                "knowledge": "Knowledge 2.",
+                "answerability_label": "unanswerable",
+                "metadata": {"nli_prefilter": {"score": 0.1}},
+                "raw_output": json.dumps(
+                    {
+                        "answerability": "unanswerable",
+                        "evidence": [],
+                        "rationale": "The key fact is missing.",
+                        "answer": "I don't know based on the provided knowledge.",
+                        "confidence": "low",
+                    }
+                ),
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path = Path(tmpdir) / "teacher.jsonl"
+            out_path = Path(tmpdir) / "validated.jsonl"
+            selected_path = Path(tmpdir) / "selected.jsonl"
+            _write_jsonl(in_path, rows)
+
+            validate_mixed_teacher_candidates(
+                in_path=str(in_path),
+                out_path=str(out_path),
+                selected_out_path=str(selected_path),
+                metrics_out=None,
+                validation_cfg=ValidationConfig(enable_semantics=False, semantic_drop_by_nli=False),
+            )
+
+            selected = _read_jsonl(selected_path)
+            by_id = {row["id"]: row for row in selected}
+            self.assertEqual(by_id["u1"]["parsed_output"]["confidence"], "high")
+            self.assertEqual(by_id["u2"]["parsed_output"]["confidence"], "low")
+            self.assertEqual(by_id["u1"]["validation_report"]["derived_confidence"], "high")
+            self.assertEqual(by_id["u2"]["validation_report"]["derived_confidence"], "low")
+
+
+class TeacherGenerateTests(unittest.TestCase):
+    @patch("grounded_qa.workflow.OpenAICompatibleTextGenerator", return_value=FakeGenerator())
+    def test_teacher_generate_uses_different_candidate_counts_by_answerability(self, _mock_generator) -> None:
+        rows = [
+            {
+                "id": "a1",
+                "source_id": "a1",
+                "question": "Who founded Acme?",
+                "knowledge": "Knowledge A",
+                "reference_answer": "Alice",
+                "answerability_label": "answerable",
+            },
+            {
+                "id": "u1",
+                "source_id": "u1",
+                "question": "Who founded Beta?",
+                "knowledge": "Knowledge U",
+                "reference_answer": "Bob",
+                "answerability_label": "unanswerable",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path = Path(tmpdir) / "in.jsonl"
+            out_path = Path(tmpdir) / "out.jsonl"
+            _write_jsonl(in_path, rows)
+            metrics = generate_teacher_candidates(
+                in_path=str(in_path),
+                out_path=str(out_path),
+                metrics_out=None,
+                cfg=TeacherGenerationConfig(
+                    answerable_num_candidates_per_example=3,
+                    unanswerable_num_candidates_per_example=1,
+                ),
+            )
+            generated = _read_jsonl(out_path)
+            self.assertEqual(metrics["num_candidates"], 4)
+            self.assertEqual(len(generated), 4)
+            self.assertEqual(sum(1 for row in generated if row["answerability_label"] == "answerable"), 3)
+            self.assertEqual(sum(1 for row in generated if row["answerability_label"] == "unanswerable"), 1)
 
 
 class MixedSftPackingTests(unittest.TestCase):

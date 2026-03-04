@@ -55,6 +55,7 @@ def prefilter_mixed_examples(
     num_unanswerable_nli_drop = 0
     num_unanswerable_checked = 0
     num_unanswerable_kept = 0
+    num_unanswerable_yes_no_checked = 0
 
     for raw_row in rows:
         num_input += 1
@@ -97,10 +98,15 @@ def prefilter_mixed_examples(
             "keep": bool(report.keep),
             "full_binary_decision": report.full_binary_decision,
             "margin": report.margin,
+            "score": report.score,
+            "used_flipped_check": bool(report.used_flipped_check),
+            "flipped_full_binary_decision": report.flipped_full_binary_decision,
+            "flipped_margin": report.flipped_margin,
             "issues": list(report.issues),
             "judge_payload": report.judge_payload,
         }
         row["metadata"] = metadata
+        num_unanswerable_yes_no_checked += int(bool(report.used_flipped_check))
         if not report.keep:
             num_unanswerable_nli_drop += 1
             continue
@@ -116,5 +122,6 @@ def prefilter_mixed_examples(
         "num_unanswerable_checked": num_unanswerable_checked,
         "num_unanswerable_kept": num_unanswerable_kept,
         "num_unanswerable_nli_drop": num_unanswerable_nli_drop,
+        "num_unanswerable_yes_no_checked": num_unanswerable_yes_no_checked,
     }
     return kept_rows, metrics

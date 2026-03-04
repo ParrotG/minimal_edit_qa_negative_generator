@@ -22,8 +22,8 @@ class DataSplitConfig:
 class AnswerabilitySplitConfig:
     """Stable split configuration for answerability-oriented source construction."""
 
-    answerable_ratio: float = 0.8
-    unanswerable_ratio: float = 0.1
+    answerable_ratio: float = 0.7
+    unanswerable_ratio: float = 0.2
     both_ratio: float = 0.1
     hash_salt: str = "answerability_split"
 

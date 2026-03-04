@@ -105,6 +105,8 @@
 
 这一步是唯一的 source 级 prompt 预算过滤入口。`teacher generate` 不再承担该职责。
 
+若原始答案为 `yes / no`，则会对翻转后的答案再做一次 NLI 判定；只有原答案与翻转答案都为 `full_binary = no` 才保留。该阶段还会保存聚合语义分数，供后续反向映射 `unanswerable` 的 `confidence`。
+
 ### 4.4 `source partition`
 
 输入：`prefiltered_examples.jsonl`  
@@ -129,6 +131,9 @@
 - `answerable` 样本向 teacher prompt 提供 `reference_answer`
 - `unanswerable` 样本不提供 `reference_answer`
 - 不再进行 source 级 token 预算过滤
+- 候选数分开配置：
+  - `answerable_num_candidates_per_example = 3`
+  - `unanswerable_num_candidates_per_example = 1`
 
 ### 5.2 `teacher validate`
 
@@ -175,8 +180,8 @@
   - 必须存在 `derived_confidence`
   - completion 中的 `confidence` 用 `derived_confidence` 覆盖
 - `unanswerable`
-  - 保留 teacher 原始 `confidence`
-  - 不要求 `derived_confidence`
+  - 用 source-prefilter 保存的语义分数反向映射 `confidence`
+  - 原答案越不被支持，`confidence` 越高
 
 SFT record 顶层使用：
 
@@ -292,6 +297,8 @@ python -m grounded_qa.cli source partition \
 python -m grounded_qa.cli teacher generate \
   --in-path data/grounded_qa/partitioned/train_sft_raw.jsonl \
   --out data/grounded_qa/teacher_candidates_train_sft.jsonl \
+  --answerable-num-candidates-per-example 3 \
+  --unanswerable-num-candidates-per-example 1 \
   --metrics-out outputs/grounded_qa/teacher-generate-train-sft-metrics.json
 
 python -m grounded_qa.cli teacher validate \

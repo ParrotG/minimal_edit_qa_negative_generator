@@ -200,7 +200,12 @@ def generate_teacher_candidates(
             if str(row.get("answerability_label") or "") == "answerable"
             else None
         )
-        for candidate_idx in range(cfg.num_candidates_per_example):
+        num_candidates = (
+            cfg.answerable_num_candidates_per_example
+            if str(row.get("answerability_label") or "") == "answerable"
+            else cfg.unanswerable_num_candidates_per_example
+        )
+        for candidate_idx in range(num_candidates):
             prompt = build_teacher_prompt(
                 knowledge=str(row.get("knowledge") or "").strip(),
                 question=str(row.get("question") or "").strip(),
@@ -233,6 +238,10 @@ def generate_teacher_candidates(
 
     metrics = {
         "num_examples": len(rows),
+        "num_answerable_examples": sum(1 for row in rows if str(row.get("answerability_label") or "") == "answerable"),
+        "num_unanswerable_examples": sum(1 for row in rows if str(row.get("answerability_label") or "") == "unanswerable"),
+        "answerable_num_candidates_per_example": cfg.answerable_num_candidates_per_example,
+        "unanswerable_num_candidates_per_example": cfg.unanswerable_num_candidates_per_example,
         "num_candidates": len(candidate_rows),
     }
     write_jsonl(out_path, candidate_rows)
@@ -285,6 +294,66 @@ def _refresh_selected_confidence(
         row["parsed_output"] = updated_output.model_dump(mode="json")
         row["canonical_output"] = canonical_output
         validation_report["derived_confidence"] = derived_confidence
+        validation_report["completion_tokens"] = completion_tokens
+        validation_report["completion_over_budget"] = completion_over_budget
+        row["validation_report"] = validation_report
+
+
+def _resolve_reverse_confidence_labels(count: int) -> list[str]:
+    if count <= 0:
+        return []
+    if count == 1:
+        return ["medium"]
+    if count == 2:
+        return ["high", "low"]
+
+    low_cut = count // 3
+    high_cut = low_cut
+    middle_count = count - low_cut - high_cut
+    labels: list[str] = []
+    labels.extend(["high"] * high_cut)
+    labels.extend(["medium"] * middle_count)
+    labels.extend(["low"] * low_cut)
+    return labels
+
+
+def _refresh_selected_unanswerable_confidence(
+    *,
+    rows: List[Dict[str, Any]],
+    validation_cfg: ValidationConfig,
+    spec: ProtocolSpec,
+) -> None:
+    scored_rows: list[tuple[float, Dict[str, Any]]] = []
+    for row in rows:
+        parsed_output = row.get("parsed_output") or {}
+        if str(parsed_output.get("answerability") or "") != "unanswerable":
+            continue
+        metadata = dict(row.get("metadata") or {})
+        nli_prefilter = dict(metadata.get("nli_prefilter") or {})
+        score = nli_prefilter.get("score")
+        if score is None:
+            continue
+        scored_rows.append((float(score), row))
+
+    if not scored_rows:
+        return
+
+    scored_rows.sort(key=lambda item: item[0])
+    labels = _resolve_reverse_confidence_labels(len(scored_rows))
+    for label, (_, row) in zip(labels, scored_rows):
+        parsed_output = row.get("parsed_output")
+        if not parsed_output:
+            continue
+        updated_output = validate_structured_payload(parsed_output).model_copy(
+            update={"confidence": ConfidenceLevel(label)}
+        )
+        canonical_output = to_canonical_json(updated_output, spec=spec)
+        completion_tokens = count_text_tokens(canonical_output, validation_cfg.tokenizer_name)
+        completion_over_budget = completion_tokens > validation_cfg.max_completion_tokens
+        row["parsed_output"] = updated_output.model_dump(mode="json")
+        row["canonical_output"] = canonical_output
+        validation_report = dict(row.get("validation_report") or {})
+        validation_report["derived_confidence"] = label
         validation_report["completion_tokens"] = completion_tokens
         validation_report["completion_over_budget"] = completion_over_budget
         row["validation_report"] = validation_report
@@ -528,6 +597,7 @@ def validate_unanswerable_candidates(
         )
 
     selected_rows = select_first_valid_unanswerable_candidate(annotated_rows)
+    _refresh_selected_unanswerable_confidence(rows=selected_rows, validation_cfg=validation_cfg, spec=spec)
     metrics = {
         "num_rows": len(rows),
         "num_parse_ok": num_parse_ok,

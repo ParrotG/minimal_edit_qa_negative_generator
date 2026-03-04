@@ -190,7 +190,14 @@ def teacher_generate(
     in_path: str = typer.Option(..., help="Input mixed example JSONL path."),
     out: str = typer.Option(..., help="Output teacher candidate JSONL path."),
     prompt_style: str = typer.Option(TeacherGenerationConfig.prompt_style, help="Teacher prompt style name."),
-    num_candidates_per_example: int = typer.Option(TeacherGenerationConfig.num_candidates_per_example, help="Number of candidates per example."),
+    answerable_num_candidates_per_example: int = typer.Option(
+        TeacherGenerationConfig.answerable_num_candidates_per_example,
+        help="Number of candidates per answerable example.",
+    ),
+    unanswerable_num_candidates_per_example: int = typer.Option(
+        TeacherGenerationConfig.unanswerable_num_candidates_per_example,
+        help="Number of candidates per unanswerable example.",
+    ),
     api_model_name: str = typer.Option(TeacherGenerationConfig.api_model_name, help="OpenAI-compatible teacher model id."),
     api_base_url: str = typer.Option(TeacherGenerationConfig.api_base_url, help="OpenAI-compatible API base URL."),
     api_key_env: str = typer.Option(TeacherGenerationConfig.api_key_env, help="Environment variable holding the API key."),
@@ -213,7 +220,8 @@ def teacher_generate(
         metrics_out=metrics_out,
         cfg=TeacherGenerationConfig(
             prompt_style=prompt_style,
-            num_candidates_per_example=num_candidates_per_example,
+            answerable_num_candidates_per_example=answerable_num_candidates_per_example,
+            unanswerable_num_candidates_per_example=unanswerable_num_candidates_per_example,
             api_model_name=api_model_name,
             api_base_url=api_base_url,
             api_key_env=api_key_env,

@@ -107,6 +107,8 @@
 - hypothesis: `The answer is {reference_answer}.`
 - 保留条件：`full_binary = no`
 
+若原始答案是 `yes / no`，则还会对翻转后的答案重复一次判定；仅当原答案与翻转答案都为 `full_binary = no` 时才保留。该阶段保存聚合分数，后续用于反向映射 `unanswerable` 的 `confidence`。
+
 这一步是唯一的 source 级 prompt token 过滤入口。`teacher generate` 不再做该过滤。
 
 ### Step 4. `source partition`
@@ -130,6 +132,9 @@
 
 - `answerable` 提供 `reference_answer`
 - `unanswerable` 不提供 `reference_answer`
+- 候选数默认分别为：
+  - `answerable = 3`
+  - `unanswerable = 1`
 
 teacher prompt 对 `unanswerable` 的要求：
 
@@ -172,7 +177,7 @@ teacher prompt 对 `unanswerable` 的要求：
   - 必须有 `derived_confidence`
   - 训练前覆盖 completion 中的 `confidence`
 - `unanswerable`
-  - 保留 teacher 原始 `confidence`
+  - 用 source-prefilter 保存的 NLI 聚合分数反向映射 `confidence`
 
 输出字段统一使用 `data_split`，不再使用旧字段 `split`。
 

@@ -11,7 +11,8 @@ class TeacherGenerationConfig:
     """Defaults for teacher candidate generation."""
 
     prompt_style: str = "teacher_v1"
-    num_candidates_per_example: int = 2
+    answerable_num_candidates_per_example: int = 3
+    unanswerable_num_candidates_per_example: int = 1
     api_model_name: str = "qwen3.5-plus"
     api_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     api_key_env: str = "DASHSCOPE_API_KEY"
