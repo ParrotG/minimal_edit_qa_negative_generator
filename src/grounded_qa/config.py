@@ -25,6 +25,7 @@ class TeacherGenerationConfig:
     temperature: float = 0.2
     top_p: float = 0.95
     seed: int = 42
+    error_log_dir: str = "log"
 
     def to_api_config(self) -> ApiGenerationConfig:
         """Convert to the reusable API generation config."""
@@ -41,6 +42,7 @@ class TeacherGenerationConfig:
             temperature=self.temperature,
             top_p=self.top_p,
             seed=self.seed,
+            error_log_dir=self.error_log_dir,
         )
 
 

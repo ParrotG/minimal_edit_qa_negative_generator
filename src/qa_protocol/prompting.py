@@ -80,7 +80,7 @@ def build_infer_prompt(
         "- In unanswerable cases, the rationale should briefly state what key information is missing, ambiguous, or contradictory.\n"
         "- Keep the answer concise and directly responsive.\n"
         "- Do not add explanations outside the JSON.\n\n"
-        f"Allowed refusal templates: {list(spec.refusal_templates)}\n\n"
+        f"Refusal templates: {spec.canonical_refusal}\n\n"
         f"Knowledge:\n{knowledge}\n\n"
         f"Question: {question}\n"
     )

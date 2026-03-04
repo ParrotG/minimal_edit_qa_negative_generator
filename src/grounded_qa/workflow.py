@@ -221,10 +221,15 @@ def generate_teacher_candidates(
             )
             prompts.append(prompt)
 
-    outputs = generator.generate_many(prompts)
+    results = generator.generate_many_results(prompts)
     candidate_rows: List[Dict[str, Any]] = []
-    for job, raw_output in zip(jobs, outputs):
+    num_generation_errors = 0
+    error_log_paths: set[str] = set()
+    for job, result in zip(jobs, results):
         base = dict(job["row"])
+        num_generation_errors += int(not result.ok)
+        if getattr(generator, "_error_log_path", None) is not None and not result.ok:
+            error_log_paths.add(str(generator._error_log_path))
         candidate_rows.append(
             {
                 **base,
@@ -232,7 +237,11 @@ def generate_teacher_candidates(
                 "teacher_model": cfg.api_model_name,
                 "prompt_style": cfg.prompt_style,
                 "prompt": job["prompt"],
-                "raw_output": raw_output,
+                "raw_output": result.text,
+                "generation_error": bool(not result.ok),
+                "generation_error_type": result.error_type,
+                "generation_error_message": result.error_message,
+                "generation_error_warning": None if result.ok else "API generation failed for this candidate.",
             }
         )
 
@@ -243,6 +252,8 @@ def generate_teacher_candidates(
         "answerable_num_candidates_per_example": cfg.answerable_num_candidates_per_example,
         "unanswerable_num_candidates_per_example": cfg.unanswerable_num_candidates_per_example,
         "num_candidates": len(candidate_rows),
+        "num_generation_errors": num_generation_errors,
+        "error_log_paths": sorted(error_log_paths),
     }
     write_jsonl(out_path, candidate_rows)
     if metrics_out:
@@ -625,6 +636,8 @@ def validate_mixed_teacher_candidates(
         raise ValueError(f"Unsupported semantic_decision_source: {validation_cfg.semantic_decision_source}")
 
     rows = [dict(row) for row in read_jsonl(in_path)]
+    generation_error_rows = [row for row in rows if bool(row.get("generation_error"))]
+    rows = [row for row in rows if not bool(row.get("generation_error"))]
     indexed_rows = [{"__input_order": idx, **row} for idx, row in enumerate(rows)]
 
     answerable_rows = [row for row in indexed_rows if str(row.get("answerability_label") or "") == "answerable"]
@@ -658,6 +671,7 @@ def validate_mixed_teacher_candidates(
 
     metrics = {
         "num_rows": len(rows),
+        "num_generation_error_rows_removed": len(generation_error_rows),
         "num_selected": len(selected_rows),
         "answerable": answerable_metrics,
         "unanswerable": unanswerable_metrics,

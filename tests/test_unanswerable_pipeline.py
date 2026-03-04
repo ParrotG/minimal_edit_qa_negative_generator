@@ -52,9 +52,55 @@ class FakeGenerator:
     def __init__(self, *args, **kwargs) -> None:
         self.prompts = []
 
-    def generate_many(self, prompts):
+    def generate_many_results(self, prompts):
         self.prompts.extend(prompts)
-        return [json.dumps({"prompt_index": idx}) for idx, _ in enumerate(prompts)]
+        return [
+            type(
+                "Result",
+                (),
+                {
+                    "ok": True,
+                    "text": json.dumps({"prompt_index": idx}),
+                    "error_type": None,
+                    "error_message": None,
+                },
+            )()
+            for idx, _ in enumerate(prompts)
+        ]
+
+
+class FakeGeneratorWithOneError(FakeGenerator):
+    def generate_many_results(self, prompts):
+        self.prompts.extend(prompts)
+        results = []
+        for idx, _ in enumerate(prompts):
+            if idx == 1:
+                results.append(
+                    type(
+                        "Result",
+                        (),
+                        {
+                            "ok": False,
+                            "text": "__API_GENERATION_ERROR__",
+                            "error_type": "RuntimeError",
+                            "error_message": "Injected API failure.",
+                        },
+                    )()
+                )
+            else:
+                results.append(
+                    type(
+                        "Result",
+                        (),
+                        {
+                            "ok": True,
+                            "text": json.dumps({"prompt_index": idx}),
+                            "error_type": None,
+                            "error_message": None,
+                        },
+                    )()
+                )
+        return results
 
 
 def _write_jsonl(path: Path, rows) -> None:
@@ -407,6 +453,97 @@ class TeacherGenerateTests(unittest.TestCase):
             self.assertEqual(len(generated), 4)
             self.assertEqual(sum(1 for row in generated if row["answerability_label"] == "answerable"), 3)
             self.assertEqual(sum(1 for row in generated if row["answerability_label"] == "unanswerable"), 1)
+
+    @patch("grounded_qa.workflow.OpenAICompatibleTextGenerator", return_value=FakeGeneratorWithOneError())
+    def test_teacher_generate_marks_generation_errors_without_aborting_batch(self, _mock_generator) -> None:
+        rows = [
+            {
+                "id": "a1",
+                "source_id": "a1",
+                "question": "Who founded Acme?",
+                "knowledge": "Knowledge A",
+                "reference_answer": "Alice",
+                "answerability_label": "answerable",
+            },
+            {
+                "id": "a2",
+                "source_id": "a2",
+                "question": "Who founded Beta?",
+                "knowledge": "Knowledge B",
+                "reference_answer": "Bob",
+                "answerability_label": "answerable",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path = Path(tmpdir) / "in.jsonl"
+            out_path = Path(tmpdir) / "out.jsonl"
+            _write_jsonl(in_path, rows)
+            metrics = generate_teacher_candidates(
+                in_path=str(in_path),
+                out_path=str(out_path),
+                metrics_out=None,
+                cfg=TeacherGenerationConfig(
+                    answerable_num_candidates_per_example=1,
+                    unanswerable_num_candidates_per_example=1,
+                ),
+            )
+            generated = _read_jsonl(out_path)
+            self.assertEqual(metrics["num_candidates"], 2)
+            self.assertEqual(metrics["num_generation_errors"], 1)
+            self.assertTrue(generated[1]["generation_error"])
+            self.assertEqual(generated[1]["raw_output"], "__API_GENERATION_ERROR__")
+
+
+class MixedValidateGenerationErrorTests(unittest.TestCase):
+    @patch("grounded_qa.workflow.count_text_tokens", side_effect=lambda text, _: len(str(text).split()))
+    def test_validate_mixed_removes_generation_error_rows(self, _mock_tokens) -> None:
+        rows = [
+            {
+                "id": "ok1",
+                "source_id": "ok1",
+                "candidate_id": 0,
+                "question": "Question?",
+                "knowledge": "Knowledge.",
+                "answerability_label": "unanswerable",
+                "generation_error": False,
+                "raw_output": json.dumps(
+                    {
+                        "answerability": "unanswerable",
+                        "evidence": [],
+                        "rationale": "The key fact is missing.",
+                        "answer": "I don't know based on the provided knowledge.",
+                        "confidence": "medium",
+                    }
+                ),
+            },
+            {
+                "id": "bad1",
+                "source_id": "bad1",
+                "candidate_id": 0,
+                "question": "Question?",
+                "knowledge": "Knowledge.",
+                "answerability_label": "unanswerable",
+                "generation_error": True,
+                "generation_error_message": "Injected API failure.",
+                "raw_output": "__API_GENERATION_ERROR__",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path = Path(tmpdir) / "teacher.jsonl"
+            out_path = Path(tmpdir) / "validated.jsonl"
+            selected_path = Path(tmpdir) / "selected.jsonl"
+            _write_jsonl(in_path, rows)
+            metrics = validate_mixed_teacher_candidates(
+                in_path=str(in_path),
+                out_path=str(out_path),
+                selected_out_path=str(selected_path),
+                metrics_out=None,
+                validation_cfg=ValidationConfig(enable_semantics=False, semantic_drop_by_nli=False),
+            )
+            validated = _read_jsonl(out_path)
+            self.assertEqual(metrics["num_generation_error_rows_removed"], 1)
+            self.assertEqual(len(validated), 1)
 
 
 class MixedSftPackingTests(unittest.TestCase):
