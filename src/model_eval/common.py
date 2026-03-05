@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 
-from dataio import optional_str, pick_first_non_empty_str
+from dataio import optional_str, pick_first_non_empty_str, read_json, read_jsonl
 
 
 def normalize_list(value: Any) -> List[str]:
@@ -44,6 +44,22 @@ def load_dataset_split(data_path: str, split: str) -> Dataset:
             return ds_obj
         raise ValueError(f"Unsupported dataset object from {data_path}: {type(ds_obj)}")
 
+    if os.path.isfile(data_path):
+        lower = data_path.lower()
+        if lower.endswith(".jsonl"):
+            return Dataset.from_list(list(read_jsonl(data_path)))
+        if lower.endswith(".json"):
+            payload = read_json(data_path)
+            if isinstance(payload, list):
+                return Dataset.from_list([dict(item) for item in payload if isinstance(item, dict)])
+            if isinstance(payload, dict):
+                if split in payload and isinstance(payload[split], list):
+                    return Dataset.from_list([dict(item) for item in payload[split] if isinstance(item, dict)])
+                if "data" in payload and isinstance(payload["data"], list):
+                    return Dataset.from_list([dict(item) for item in payload["data"] if isinstance(item, dict)])
+                return Dataset.from_list([payload])
+        return load_dataset("json", data_files=data_path, split="train")
+
     return load_dataset("json", data_files=data_path, split="train")
 
 
@@ -61,6 +77,59 @@ def _extract_question_from_prompt(prompt: str) -> str:
     return ""
 
 
+def extract_knowledge_question_from_infer_prompt(prompt: str) -> Tuple[str, str]:
+    """Best-effort extraction of knowledge and question from infer prompt text."""
+
+    text = str(prompt or "")
+    if not text.strip():
+        return "", ""
+
+    marker_knowledge = "\nKnowledge:\n"
+    marker_question = "\n\nQuestion: "
+    left = text.rfind(marker_knowledge)
+    if left < 0:
+        return "", _extract_question_from_prompt(text)
+
+    tail = text[left + len(marker_knowledge) :]
+    qpos = tail.rfind(marker_question.strip())
+    if qpos < 0:
+        qpos = tail.rfind(marker_question)
+    if qpos < 0:
+        return tail.strip(), _extract_question_from_prompt(text)
+
+    if tail[qpos:].startswith("\n\nQuestion: "):
+        question_text = tail[qpos + len("\n\nQuestion: ") :]
+    elif tail[qpos:].startswith("Question: "):
+        question_text = tail[qpos + len("Question: ") :]
+    else:
+        question_text = ""
+    knowledge_text = tail[:qpos].strip()
+    return knowledge_text, question_text.strip()
+
+
+def _extract_answerability_label(row: Dict[str, Any]) -> str:
+    label = optional_str(row, "answerability_label")
+    if label:
+        return label
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict):
+        return str(metadata.get("answerability_label") or "").strip()
+    return ""
+
+
+def _extract_reference_answer(row: Dict[str, Any]) -> str:
+    reference = pick_first_non_empty_str(
+        row,
+        ["reference_answer", "answer", "chosen", "reference", "right_answer"],
+    )
+    if reference:
+        return reference
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict):
+        return str(metadata.get("reference_answer") or "").strip()
+    return ""
+
+
 def _extract_knowledge(row: Dict[str, Any]) -> str:
     knowledge = optional_str(row, "knowledge")
     if knowledge:
@@ -70,31 +139,42 @@ def _extract_knowledge(row: Dict[str, Any]) -> str:
         values = normalize_list(row.get(key))
         if values:
             return "\n\n".join(values)
+    prompt = optional_str(row, "prompt")
+    if prompt:
+        parsed_knowledge, _ = extract_knowledge_question_from_infer_prompt(prompt)
+        return parsed_knowledge
     return ""
 
 
 def extract_generation_item(row: Dict[str, Any], idx: int) -> Optional[Dict[str, Any]]:
     """Extract one normalized QA item from a row."""
 
+    prompt = optional_str(row, "prompt")
     question = pick_first_non_empty_str(row, ["question", "eval_question", "input"])
     if not question:
-        question = _extract_question_from_prompt(optional_str(row, "prompt"))
+        if prompt:
+            _, parsed_question = extract_knowledge_question_from_infer_prompt(prompt)
+            question = parsed_question or _extract_question_from_prompt(prompt)
 
     knowledge = _extract_knowledge(row)
     if not question or not knowledge:
         return None
 
-    source_id = str(row.get("source_id") or row.get("id") or idx)
-    reference_answer = pick_first_non_empty_str(
-        row,
-        ["reference_answer", "chosen", "reference", "right_answer"],
-    )
+    source_id = str(row.get("source_id") or row.get("id") or idx).strip()
+    row_id = str(row.get("id") or source_id).strip()
+    reference_answer = _extract_reference_answer(row)
+    if not prompt:
+        prompt = ""
     return {
         "sample_id": idx,
+        "id": row_id,
         "source_id": source_id,
         "question": question,
         "knowledge": knowledge,
+        "prompt": prompt,
         "reference_answer": reference_answer,
+        "answerability_label": _extract_answerability_label(row),
+        "data_split": str(row.get("data_split") or "").strip(),
     }
 
 
@@ -118,6 +198,23 @@ def load_generation_items(
         if max_samples > 0 and len(out) >= max_samples:
             break
     return out
+
+
+def load_structured_generation_items(
+    *,
+    data_path: str,
+    split: str,
+    max_samples: int,
+    seed: int,
+) -> List[Dict[str, Any]]:
+    """Load normalized QA items for structured generation."""
+
+    return load_generation_items(
+        data_path=data_path,
+        split=split,
+        max_samples=max_samples,
+        seed=seed,
+    )
 
 
 def to_chat_prompt(tokenizer: Any, prompt: str, enable_thinking: bool) -> str:
@@ -144,16 +241,43 @@ def to_chat_prompt(tokenizer: Any, prompt: str, enable_thinking: bool) -> str:
         return prompt
 
 
-def normalize_generated_row(row: Dict[str, Any], idx: int) -> Optional[Dict[str, Any]]:
+def _extract_generated_answer(row: Dict[str, Any], answer_source: str) -> str:
+    parsed_output = row.get("parsed_output")
+    parsed_answer = ""
+    parsed_rationale = ""
+    if isinstance(parsed_output, dict):
+        parsed_answer = str(parsed_output.get("answer") or "").strip()
+        parsed_rationale = str(parsed_output.get("rationale") or "").strip()
+
+    if answer_source == "rationale_plus_answer":
+        if parsed_rationale and parsed_answer:
+            return f"{parsed_rationale}\nTherefore the answer is {parsed_answer}"
+        if parsed_answer:
+            return parsed_answer
+
+    if parsed_answer:
+        return parsed_answer
+    return pick_first_non_empty_str(row, ["answer", "actual_output", "raw_output"])
+
+
+def normalize_generated_row(
+    row: Dict[str, Any],
+    idx: int,
+    *,
+    answer_source: str = "answer",
+) -> Optional[Dict[str, Any]]:
     """Normalize one generated-answer row for downstream evaluators."""
 
-    answer = pick_first_non_empty_str(row, ["answer", "actual_output"])
+    answer = _extract_generated_answer(row, answer_source=answer_source)
     if not answer:
         return None
 
+    prompt = optional_str(row, "prompt")
     question = pick_first_non_empty_str(row, ["question", "eval_question", "input"])
     if not question:
-        question = _extract_question_from_prompt(optional_str(row, "prompt"))
+        if prompt:
+            _, parsed_question = extract_knowledge_question_from_infer_prompt(prompt)
+            question = parsed_question or _extract_question_from_prompt(prompt)
 
     knowledge = _extract_knowledge(row)
     if not question or not knowledge:
@@ -165,7 +289,7 @@ def normalize_generated_row(row: Dict[str, Any], idx: int) -> Optional[Dict[str,
 
     sample_id = safe_int(row.get("sample_id"), idx)
     source_id = str(row.get("source_id") or row.get("id") or sample_id)
-    reference_answer = pick_first_non_empty_str(row, ["reference_answer", "chosen"])
+    reference_answer = _extract_reference_answer(row)
 
     return {
         "model_tag": model_tag,
@@ -175,7 +299,10 @@ def normalize_generated_row(row: Dict[str, Any], idx: int) -> Optional[Dict[str,
         "source_id": source_id,
         "question": question,
         "knowledge": knowledge,
+        "prompt": prompt,
         "reference_answer": reference_answer,
+        "answerability_label": _extract_answerability_label(row),
+        "data_split": str(row.get("data_split") or "").strip(),
         "answer": answer,
     }
 
@@ -186,6 +313,7 @@ def load_generated_rows(
     split: str,
     max_samples: int,
     seed: int,
+    answer_source: str = "answer",
 ) -> List[Dict[str, Any]]:
     """Load normalized generated-answer rows for evaluation."""
 
@@ -193,7 +321,7 @@ def load_generated_rows(
 
     out: List[Dict[str, Any]] = []
     for idx, row in enumerate(ds):
-        rec = normalize_generated_row(row, idx)
+        rec = normalize_generated_row(row, idx, answer_source=answer_source)
         if rec is None:
             continue
         out.append(rec)

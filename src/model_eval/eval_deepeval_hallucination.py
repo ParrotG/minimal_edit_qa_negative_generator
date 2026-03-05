@@ -21,6 +21,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", type=str, default="train", help="Split name when generated_path is a DatasetDict.")
     parser.add_argument("--max_samples", type=int, default=-1, help="Maximum evaluated rows. -1 means all.")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--answer_source",
+        type=str,
+        default="answer",
+        choices=["answer", "rationale_plus_answer"],
+        help="Select the evaluated text source.",
+    )
 
     # DeepEval Hallucination metric
     parser.add_argument("--judge_model", type=str, default="gpt-5.2")
@@ -42,6 +49,7 @@ def main() -> None:
         split=args.split,
         max_samples=args.max_samples,
         seed=args.seed,
+        answer_source=args.answer_source,
     )
     if not rows:
         raise RuntimeError("No valid generated rows found for DeepEval hallucination evaluation.")

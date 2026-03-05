@@ -10,16 +10,16 @@ try:
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
     from llm_textgen import GeneratorModelSpec, build_generator_model_specs, load_generator_from_spec
 
-from dataio import pick_first_non_empty_str, write_jsonl
+from dataio import write_jsonl
 from qa_protocol import build_infer_prompt, parse_structured_output
 
-from .common import load_dataset_split
+from .common import load_structured_generation_items
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, required=True, help="Dataset path (save_to_disk dir or JSON/JSONL).")
-    parser.add_argument("--split", type=str, default="test", help="Split name when data_path is a DatasetDict.")
+    parser.add_argument("--split", type=str, default="validation", help="Split name when data_path is a DatasetDict.")
     parser.add_argument("--max_samples", type=int, default=200, help="Maximum sampled rows. -1 means all.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--base_model", type=str, default="Qwen/Qwen3-0.6B")
@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--include_base", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--max_new_tokens", type=int, default=256)
+    parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=None)
@@ -46,33 +46,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_eval_items(data_path: str, split: str, max_samples: int, seed: int) -> List[Dict[str, Any]]:
-    ds = load_dataset_split(data_path=data_path, split=split).shuffle(seed=seed)
-    out: List[Dict[str, Any]] = []
-    for idx, row in enumerate(ds):
-        question = pick_first_non_empty_str(row, ["question", "eval_question", "input"])
-        knowledge = pick_first_non_empty_str(row, ["knowledge", "context"])
-        if not question or not knowledge:
-            continue
-        out.append(
-            {
-                "sample_id": idx,
-                "source_id": str(row.get("source_id") or row.get("id") or idx),
-                "question": question,
-                "knowledge": knowledge,
-                "reference_answer": pick_first_non_empty_str(row, ["reference_answer", "answer"]),
-                "answerability_label": str(row.get("answerability_label") or "").strip(),
-                "data_split": row.get("data_split") or split,
-            }
-        )
-        if max_samples > 0 and len(out) >= max_samples:
-            break
-    return out
-
-
 def main() -> None:
     args = parse_args()
-    items = _load_eval_items(
+    items = load_structured_generation_items(
         data_path=args.data_path,
         split=args.split,
         max_samples=args.max_samples,
@@ -109,7 +85,11 @@ def main() -> None:
 
         for start in range(0, len(items), args.batch_size):
             batch = items[start : start + args.batch_size]
-            prompts = [build_infer_prompt(knowledge=item["knowledge"], question=item["question"]) for item in batch]
+            prompts = [
+                str(item.get("prompt") or "").strip()
+                or build_infer_prompt(knowledge=str(item["knowledge"]), question=str(item["question"]))
+                for item in batch
+            ]
             outputs = generator.generate_many(
                 prompts,
                 batch_size=args.batch_size,
@@ -132,13 +112,14 @@ def main() -> None:
                         "model_tag": spec.tag,
                         "model_step": int(spec.step),
                         "model_path": spec.display_name,
+                        "id": str(sample.get("id") or sample["source_id"]),
                         "sample_id": int(sample["sample_id"]),
                         "source_id": sample["source_id"],
                         "question": sample["question"],
                         "knowledge": sample["knowledge"],
                         "reference_answer": sample["reference_answer"],
                         "answerability_label": sample["answerability_label"],
-                        "data_split": sample["data_split"],
+                        "data_split": sample.get("data_split") or args.split,
                         "prompt_style": "infer_v1",
                         "prompt": prompt,
                         "raw_output": raw_output,
