@@ -126,11 +126,14 @@ def main() -> None:
                         "model_tag": spec.tag,
                         "model_step": int(spec.step),
                         "model_path": spec.display_name,
+                        "id": str(sample.get("id") or sample["source_id"]),
                         "sample_id": int(sample["sample_id"]),
                         "source_id": sample["source_id"],
                         "question": sample["question"],
                         "knowledge": sample["knowledge"],
                         "reference_answer": sample["reference_answer"],
+                        "answerability_label": sample.get("answerability_label") or "",
+                        "data_split": sample.get("data_split") or args.split,
                         "answer": answer,
                     }
                 )

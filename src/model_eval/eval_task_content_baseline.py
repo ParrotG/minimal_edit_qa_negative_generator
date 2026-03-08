@@ -1,0 +1,384 @@
+from __future__ import annotations
+
+import argparse
+import os
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from dataio import write_jsonl
+from llm_textgen.api_client import OpenAICompatibleTextGenerator
+from qa_checks import CorrectnessConfig, check_answer_correctness
+from qa_judge.config import JudgeConfig, NLIConfig
+from qa_judge.judge import AnswerJudge
+from qa_judge.nli import NLIVerifier
+
+from .answer_extraction import AnswerExtractionConfig, extract_answers_with_llm
+from .common import group_rows_by_model, load_generated_rows, write_csv
+from .correctness_bem import AnswerEquivalenceBemJudge, BemConfig, BemReviewReport
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--generated_path", type=str, required=True, help="Generated answers JSONL or dataset path.")
+    parser.add_argument("--split", type=str, default="train", help="Split name when generated_path is a DatasetDict.")
+    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum evaluated rows per run. -1 means all.")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--semantic_decision_source", type=str, default="full_binary", choices=["full_binary", "reject_aware"])
+    parser.add_argument("--semantic_match_f1_threshold", type=float, default=0.85)
+    parser.add_argument("--nli_model_name", type=str, default=NLIConfig.model_name)
+    parser.add_argument("--nli_device", type=str, default=NLIConfig.device)
+    parser.add_argument("--nli_batch_size", type=int, default=NLIConfig.batch_size)
+    parser.add_argument("--nli_max_length", type=int, default=NLIConfig.max_length)
+    parser.add_argument("--nli_fp16", action=argparse.BooleanOptionalAction, default=NLIConfig.fp16)
+    parser.add_argument("--temperature", type=float, default=JudgeConfig.temperature)
+    parser.add_argument("--full_margin_threshold", type=float, default=JudgeConfig.full_margin_threshold)
+    parser.add_argument("--reject_margin_threshold", type=float, default=JudgeConfig.reject_margin_threshold)
+    parser.add_argument("--reject_band_half_width", type=float, default=JudgeConfig.reject_band_half_width)
+    parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_fail_as_negative)
+    parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_check_answer_type)
+    parser.add_argument("--qa_spacy_model", type=str, default=JudgeConfig.qa_spacy_model)
+    parser.add_argument("--bem_model_name", type=str, default=BemConfig.model_name)
+    parser.add_argument("--bem_device", type=str, default=BemConfig.device)
+    parser.add_argument("--bem_batch_size", type=int, default=BemConfig.batch_size)
+    parser.add_argument("--bem_max_length", type=int, default=BemConfig.max_length)
+    parser.add_argument("--api_model_name", type=str, default=AnswerExtractionConfig.api_model_name)
+    parser.add_argument("--api_base_url", type=str, default=AnswerExtractionConfig.api_base_url)
+    parser.add_argument("--api_key_env", type=str, default=AnswerExtractionConfig.api_key_env)
+    parser.add_argument("--api_timeout_seconds", type=float, default=AnswerExtractionConfig.api_timeout_seconds)
+    parser.add_argument("--api_max_concurrency", type=int, default=AnswerExtractionConfig.api_max_concurrency)
+    parser.add_argument("--api_max_retries", type=int, default=AnswerExtractionConfig.api_max_retries)
+    parser.add_argument("--api_backoff_base_seconds", type=float, default=AnswerExtractionConfig.api_backoff_base_seconds)
+    parser.add_argument("--api_backoff_max_seconds", type=float, default=AnswerExtractionConfig.api_backoff_max_seconds)
+    parser.add_argument("--api_max_new_tokens", type=int, default=AnswerExtractionConfig.max_new_tokens)
+    parser.add_argument("--api_temperature", type=float, default=AnswerExtractionConfig.temperature)
+    parser.add_argument("--api_top_p", type=float, default=AnswerExtractionConfig.top_p)
+    parser.add_argument("--api_seed", type=int, default=AnswerExtractionConfig.seed)
+    parser.add_argument("--error_log_dir", type=str, default=AnswerExtractionConfig.error_log_dir)
+    parser.add_argument("--extraction_max_attempts", type=int, default=AnswerExtractionConfig.max_attempts)
+    parser.add_argument("--metrics_out", type=str, required=True, help="Per-model summary CSV path.")
+    parser.add_argument("--details_out", type=str, default=None, help="Optional per-sample details JSONL path.")
+    return parser.parse_args()
+
+
+def _safe_rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return float("nan")
+    return float(numerator / denominator)
+
+
+def _safe_mean(values: Sequence[float]) -> float:
+    if not values:
+        return float("nan")
+    return float(sum(values) / len(values))
+
+
+def _build_answer_judge(args: argparse.Namespace) -> AnswerJudge:
+    verifier = NLIVerifier(
+        model_name=args.nli_model_name,
+        device=args.nli_device,
+        batch_size=args.nli_batch_size,
+        max_length=args.nli_max_length,
+        fp16=bool(args.nli_fp16),
+    )
+    cfg = JudgeConfig(
+        temperature=args.temperature,
+        full_margin_threshold=args.full_margin_threshold,
+        reject_margin_threshold=args.reject_margin_threshold,
+        reject_band_half_width=args.reject_band_half_width,
+        qa_fail_as_negative=bool(args.qa_fail_as_negative),
+        qa_check_answer_type=bool(args.qa_check_answer_type),
+        qa_spacy_model=args.qa_spacy_model,
+    )
+    return AnswerJudge(cfg=cfg, verifier=verifier)
+
+
+def _build_bem_judge(args: argparse.Namespace) -> AnswerEquivalenceBemJudge:
+    return AnswerEquivalenceBemJudge(
+        BemConfig(
+            model_name=args.bem_model_name,
+            device=args.bem_device,
+            batch_size=args.bem_batch_size,
+            max_length=args.bem_max_length,
+        )
+    )
+
+
+def _semantic_decision(judge_payload: Dict[str, Any], decision_source: str) -> str:
+    if decision_source == "reject_aware":
+        return str(((judge_payload.get("reject_aware") or {}).get("decision")) or "abstain")
+    return str(((judge_payload.get("full_binary") or {}).get("decision")) or "no")
+
+
+def _build_extraction_cfg(args: argparse.Namespace) -> AnswerExtractionConfig:
+    return AnswerExtractionConfig(
+        api_model_name=args.api_model_name,
+        api_base_url=args.api_base_url,
+        api_key_env=args.api_key_env,
+        api_timeout_seconds=args.api_timeout_seconds,
+        api_max_concurrency=args.api_max_concurrency,
+        api_max_retries=args.api_max_retries,
+        api_backoff_base_seconds=args.api_backoff_base_seconds,
+        api_backoff_max_seconds=args.api_backoff_max_seconds,
+        max_new_tokens=args.api_max_new_tokens,
+        temperature=args.api_temperature,
+        top_p=args.api_top_p,
+        seed=args.api_seed,
+        error_log_dir=args.error_log_dir,
+        max_attempts=args.extraction_max_attempts,
+    )
+
+
+def _evaluate_model_rows(
+    *,
+    rows: List[Dict[str, Any]],
+    extractor: OpenAICompatibleTextGenerator,
+    extraction_cfg: AnswerExtractionConfig,
+    judge: AnswerJudge,
+    bem_judge: AnswerEquivalenceBemJudge,
+    decision_source: str,
+    correctness_cfg: CorrectnessConfig,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    if not rows:
+        return {
+            "num_rows": 0,
+            "extraction_parse_ok_rate": float("nan"),
+            "refusal_detected_rate": float("nan"),
+            "answerability_total": 0,
+            "answerability_accuracy": float("nan"),
+            "correctness_total": 0,
+            "correctness_strict_rate": float("nan"),
+            "correctness_bem_review_total": 0,
+            "correctness_bem_positive_rate": float("nan"),
+            "correctness_reviewed_rate": float("nan"),
+            "semantic_total": 0,
+            "semantic_yes_rate": float("nan"),
+            "semantic_margin_mean": float("nan"),
+        }, []
+
+    extracted_rows = extract_answers_with_llm(rows=rows, generator=extractor, cfg=extraction_cfg)
+
+    bem_inputs: List[Dict[str, str]] = []
+    bem_indices: List[int] = []
+    judge_inputs: List[Dict[str, Any]] = []
+    judge_indices: List[int] = []
+    details: List[Dict[str, Any]] = []
+
+    parse_ok_count = 0
+    refusal_detected_count = 0
+    answerability_total = 0
+    answerability_correct = 0
+    correctness_total = 0
+    correctness_strict_ok = 0
+
+    for idx, row in enumerate(extracted_rows):
+        extraction_parse_ok = bool(row.get("extraction_parse_ok"))
+        parse_ok_count += int(extraction_parse_ok)
+        refusal_detected = row.get("refusal_detected")
+        if refusal_detected is True:
+            refusal_detected_count += 1
+
+        gold_label = str(row.get("answerability_label") or "").strip()
+        pred_label: Optional[str] = None
+        if extraction_parse_ok and refusal_detected is not None:
+            pred_label = "unanswerable" if bool(refusal_detected) else "answerable"
+            if gold_label:
+                answerability_total += 1
+                answerability_correct += int(pred_label == gold_label)
+
+        extracted_answer = str(row.get("extracted_answer") or "").strip()
+        strict_report = None
+        if pred_label == "answerable" and extracted_answer and str(row.get("reference_answer") or "").strip():
+            correctness_total += 1
+            strict_report = check_answer_correctness(
+                answer=extracted_answer,
+                reference_answer=str(row.get("reference_answer") or "").strip(),
+                cfg=correctness_cfg,
+            )
+            correctness_strict_ok += int(strict_report.ok)
+            if not strict_report.ok:
+                bem_inputs.append(
+                    {
+                        "question": str(row.get("question") or ""),
+                        "reference_answer": str(row.get("reference_answer") or "").strip(),
+                        "answer": extracted_answer,
+                    }
+                )
+                bem_indices.append(idx)
+        if pred_label == "answerable" and extracted_answer:
+            judge_inputs.append(
+                {
+                    "knowledge": str(row.get("knowledge") or ""),
+                    "question": str(row.get("question") or ""),
+                    "answer": extracted_answer,
+                }
+            )
+            judge_indices.append(idx)
+
+        details.append(
+            {
+                **row,
+                "pred_answerability": pred_label,
+                "answerability_match": None if pred_label is None or not gold_label else bool(pred_label == gold_label),
+                "strict_report": strict_report,
+                "correctness_bem_report": None,
+                "judge_payload": None,
+                "semantic_decision": None,
+                "semantic_margin": None,
+            }
+        )
+
+    if bem_inputs:
+        bem_reports = bem_judge.review_batch(bem_inputs)
+        for bem_idx, detail_idx in enumerate(bem_indices):
+            details[detail_idx]["correctness_bem_report"] = bem_reports[bem_idx]
+
+    if judge_inputs:
+        judged_rows, _ = judge.judge(judge_inputs)
+        for judged_idx, detail_idx in enumerate(judge_indices):
+            judge_payload = dict((judged_rows[judged_idx].get("judge") or {}))
+            details[detail_idx]["judge_payload"] = judge_payload
+            details[detail_idx]["semantic_decision"] = _semantic_decision(judge_payload, decision_source=decision_source)
+            details[detail_idx]["semantic_margin"] = judge_payload.get("margin")
+
+    correctness_bem_review_total = 0
+    correctness_bem_positive = 0
+    correctness_reviewed_ok = 0
+    semantic_total = 0
+    semantic_yes = 0
+    semantic_margins: List[float] = []
+    output_rows: List[Dict[str, Any]] = []
+
+    for row in details:
+        strict_report = row["strict_report"]
+        bem_report: Optional[BemReviewReport] = row["correctness_bem_report"]
+        reviewed_ok = None
+        if strict_report is not None:
+            reviewed_ok = bool(strict_report.ok)
+            if not strict_report.ok and bem_report is not None:
+                correctness_bem_review_total += 1
+                correctness_bem_positive += int(bool(bem_report.ok))
+                reviewed_ok = bool(bem_report.ok)
+            correctness_reviewed_ok += int(bool(reviewed_ok))
+
+        semantic_decision = row["semantic_decision"]
+        semantic_margin = row["semantic_margin"]
+        if semantic_decision in {"yes", "no"}:
+            semantic_total += 1
+            semantic_yes += int(semantic_decision == "yes")
+        if semantic_margin is not None:
+            semantic_margins.append(float(semantic_margin))
+
+        output_rows.append(
+            {
+                "model_tag": row.get("model_tag"),
+                "model_step": row.get("model_step"),
+                "model_path": row.get("model_path"),
+                "sample_id": row.get("sample_id"),
+                "source_id": row.get("source_id"),
+                "data_split": row.get("data_split"),
+                "question": row.get("question"),
+                "reference_answer": row.get("reference_answer"),
+                "raw_answer": row.get("answer"),
+                "answerability_label": row.get("answerability_label"),
+                "pred_answerability": row.get("pred_answerability"),
+                "answerability_match": row.get("answerability_match"),
+                "extraction_raw_response": row.get("extraction_raw_response"),
+                "extraction_attempt_count": row.get("extraction_attempt_count"),
+                "extraction_api_ok": row.get("extraction_api_ok"),
+                "extraction_parse_ok": row.get("extraction_parse_ok"),
+                "extraction_error_type": row.get("extraction_error_type"),
+                "extraction_error_message": row.get("extraction_error_message"),
+                "extraction_errors": row.get("extraction_errors"),
+                "extracted_answer": row.get("extracted_answer"),
+                "refusal_detected": row.get("refusal_detected"),
+                "refusal_reason": row.get("refusal_reason"),
+                "correctness_ok": None if strict_report is None else strict_report.ok,
+                "correctness_exact_match": None if strict_report is None else strict_report.exact_match,
+                "correctness_token_f1": None if strict_report is None else strict_report.token_f1,
+                "correctness_bem_used": None if bem_report is None else bem_report.used,
+                "correctness_bem_ok": None if bem_report is None else bem_report.ok,
+                "correctness_bem_probability": None if bem_report is None else bem_report.equivalent_probability,
+                "correctness_reviewed_ok": reviewed_ok,
+                "semantic_decision": semantic_decision,
+                "semantic_margin": semantic_margin,
+            }
+        )
+
+    metrics = {
+        "num_rows": len(rows),
+        "extraction_parse_ok_rate": _safe_rate(parse_ok_count, len(rows)),
+        "refusal_detected_rate": _safe_rate(refusal_detected_count, len(rows)),
+        "answerability_total": answerability_total,
+        "answerability_correct": answerability_correct,
+        "answerability_accuracy": _safe_rate(answerability_correct, answerability_total),
+        "correctness_total": correctness_total,
+        "correctness_strict_ok": correctness_strict_ok,
+        "correctness_strict_rate": _safe_rate(correctness_strict_ok, correctness_total),
+        "correctness_bem_review_total": correctness_bem_review_total,
+        "correctness_bem_positive": correctness_bem_positive,
+        "correctness_bem_positive_rate": _safe_rate(correctness_bem_positive, correctness_bem_review_total),
+        "correctness_reviewed_ok": correctness_reviewed_ok,
+        "correctness_reviewed_rate": _safe_rate(correctness_reviewed_ok, correctness_total),
+        "semantic_total": semantic_total,
+        "semantic_yes_rate": _safe_rate(semantic_yes, semantic_total),
+        "semantic_margin_mean": _safe_mean(semantic_margins),
+    }
+    return metrics, output_rows
+
+
+def main() -> None:
+    args = parse_args()
+    rows = load_generated_rows(
+        generated_path=args.generated_path,
+        split=args.split,
+        max_samples=args.max_samples,
+        seed=args.seed,
+        answer_source="answer",
+    )
+    if not rows:
+        raise RuntimeError("No valid generated rows found for task-content baseline evaluation.")
+
+    api_key = os.getenv(args.api_key_env, "").strip()
+    if not api_key:
+        raise RuntimeError(f"Environment variable {args.api_key_env} is not set.")
+
+    grouped = group_rows_by_model(rows)
+    extraction_cfg = _build_extraction_cfg(args)
+    extractor = OpenAICompatibleTextGenerator(cfg=extraction_cfg.to_api_config(), api_key=api_key)
+    judge = _build_answer_judge(args)
+    bem_judge = _build_bem_judge(args)
+    correctness_cfg = CorrectnessConfig(semantic_match_f1_threshold=args.semantic_match_f1_threshold)
+
+    summary_rows: List[Dict[str, Any]] = []
+    detail_rows: List[Dict[str, Any]] = []
+    for (model_tag, model_step, model_path), model_rows in sorted(
+        grouped.items(),
+        key=lambda item: (item[0][1], item[0][0], item[0][2]),
+    ):
+        metrics, details = _evaluate_model_rows(
+            rows=model_rows,
+            extractor=extractor,
+            extraction_cfg=extraction_cfg,
+            judge=judge,
+            bem_judge=bem_judge,
+            decision_source=args.semantic_decision_source,
+            correctness_cfg=correctness_cfg,
+        )
+        summary_rows.append(
+            {
+                "model_tag": model_tag,
+                "model_step": model_step,
+                "model_path": model_path,
+                **metrics,
+            }
+        )
+        detail_rows.extend(details)
+
+    write_csv(summary_rows, args.metrics_out)
+    print(f"Saved metrics to: {args.metrics_out}")
+    if args.details_out:
+        write_jsonl(args.details_out, detail_rows)
+        print(f"Saved details to: {args.details_out}")
+
+
+if __name__ == "__main__":
+    main()
