@@ -154,13 +154,25 @@ class UnifiedTextGenerator:
             return prompt
 
     @staticmethod
-    def _build_qa_prompt(knowledge: str, question: str) -> str:
+    def _build_qa_prompt(knowledge: str, question: str, *, encourage_refusal: bool = False) -> str:
         """Build a QA-style prompt from knowledge and question fields."""
 
         question_text = str(question or "").strip()
         if not question_text:
             raise ValueError("question must not be empty.")
-        return build_qa_answer_prefix(knowledge=knowledge, question=question_text)
+        prompt = build_qa_answer_prefix(knowledge=knowledge, question=question_text)
+        if not encourage_refusal:
+            return prompt
+        if prompt.endswith("Answer: "):
+            return (
+                prompt[:-8]
+                + "If the provided knowledge is insufficient, reply that you do not know based on the knowledge.\n"
+                + "Answer: "
+            )
+        return (
+            f"{prompt}\n"
+            "If the provided knowledge is insufficient, reply that you do not know based on the knowledge.\n"
+        )
 
     def _generate_batch(
         self,
@@ -330,6 +342,7 @@ class UnifiedTextGenerator:
         *,
         knowledge: str,
         question: str,
+        encourage_refusal: bool = False,
         max_new_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
@@ -343,7 +356,7 @@ class UnifiedTextGenerator:
     ) -> str:
         """Generate one answer using (knowledge, question) inputs."""
 
-        prompt = self._build_qa_prompt(knowledge=knowledge, question=question)
+        prompt = self._build_qa_prompt(knowledge=knowledge, question=question, encourage_refusal=encourage_refusal)
         return self.generate_one(
             prompt,
             max_new_tokens=max_new_tokens,
@@ -362,6 +375,7 @@ class UnifiedTextGenerator:
         self,
         qa_items: Sequence[Dict[str, str]],
         *,
+        encourage_refusal: bool = False,
         batch_size: Optional[int] = None,
         max_new_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -384,6 +398,7 @@ class UnifiedTextGenerator:
                 self._build_qa_prompt(
                     knowledge=str(item.get("knowledge", "")),
                     question=str(item["question"]),
+                    encourage_refusal=encourage_refusal,
                 )
             )
 

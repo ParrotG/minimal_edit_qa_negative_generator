@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable_thinking", action="store_true")
     parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--strip_role_markers", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--encourage_refusal", action=argparse.BooleanOptionalAction, default=True)
 
     # Output
     parser.add_argument("--out_jsonl", type=str, required=True, help="Generated answers JSONL output path.")
@@ -118,6 +119,7 @@ def main() -> None:
                 enable_thinking=args.enable_thinking,
                 strip_think_tags=args.strip_think_tags,
                 strip_role_markers=args.strip_role_markers,
+                encourage_refusal=bool(args.encourage_refusal),
             )
 
             for sample, answer in zip(batch, answers):

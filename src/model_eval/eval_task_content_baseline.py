@@ -13,7 +13,11 @@ from qa_judge.nli import NLIVerifier
 
 from .answer_extraction import AnswerExtractionConfig, extract_answers_with_llm
 from .common import group_rows_by_model, load_generated_rows, write_csv
-from .correctness_bem import AnswerEquivalenceBemJudge, BemConfig, BemReviewReport
+from .correctness_transformer_matcher import (
+    AnswerEquivalenceTransformerMatcher,
+    TransformerMatcherConfig,
+    TransformerMatcherReviewReport,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,10 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_fail_as_negative)
     parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_check_answer_type)
     parser.add_argument("--qa_spacy_model", type=str, default=JudgeConfig.qa_spacy_model)
-    parser.add_argument("--bem_model_name", type=str, default=BemConfig.model_name)
-    parser.add_argument("--bem_device", type=str, default=BemConfig.device)
-    parser.add_argument("--bem_batch_size", type=int, default=BemConfig.batch_size)
-    parser.add_argument("--bem_max_length", type=int, default=BemConfig.max_length)
+    parser.add_argument("--matcher_model_name", type=str, default=TransformerMatcherConfig.model_name)
     parser.add_argument("--api_model_name", type=str, default=AnswerExtractionConfig.api_model_name)
     parser.add_argument("--api_base_url", type=str, default=AnswerExtractionConfig.api_base_url)
     parser.add_argument("--api_key_env", type=str, default=AnswerExtractionConfig.api_key_env)
@@ -91,13 +92,10 @@ def _build_answer_judge(args: argparse.Namespace) -> AnswerJudge:
     return AnswerJudge(cfg=cfg, verifier=verifier)
 
 
-def _build_bem_judge(args: argparse.Namespace) -> AnswerEquivalenceBemJudge:
-    return AnswerEquivalenceBemJudge(
-        BemConfig(
-            model_name=args.bem_model_name,
-            device=args.bem_device,
-            batch_size=args.bem_batch_size,
-            max_length=args.bem_max_length,
+def _build_transformer_matcher(args: argparse.Namespace) -> AnswerEquivalenceTransformerMatcher:
+    return AnswerEquivalenceTransformerMatcher(
+        TransformerMatcherConfig(
+            model_name=args.matcher_model_name,
         )
     )
 
@@ -133,7 +131,7 @@ def _evaluate_model_rows(
     extractor: OpenAICompatibleTextGenerator,
     extraction_cfg: AnswerExtractionConfig,
     judge: AnswerJudge,
-    bem_judge: AnswerEquivalenceBemJudge,
+    matcher: AnswerEquivalenceTransformerMatcher,
     decision_source: str,
     correctness_cfg: CorrectnessConfig,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -146,8 +144,8 @@ def _evaluate_model_rows(
             "answerability_accuracy": float("nan"),
             "correctness_total": 0,
             "correctness_strict_rate": float("nan"),
-            "correctness_bem_review_total": 0,
-            "correctness_bem_positive_rate": float("nan"),
+            "correctness_matcher_review_total": 0,
+            "correctness_matcher_positive_rate": float("nan"),
             "correctness_reviewed_rate": float("nan"),
             "semantic_total": 0,
             "semantic_yes_rate": float("nan"),
@@ -156,8 +154,8 @@ def _evaluate_model_rows(
 
     extracted_rows = extract_answers_with_llm(rows=rows, generator=extractor, cfg=extraction_cfg)
 
-    bem_inputs: List[Dict[str, str]] = []
-    bem_indices: List[int] = []
+    matcher_inputs: List[Dict[str, str]] = []
+    matcher_indices: List[int] = []
     judge_inputs: List[Dict[str, Any]] = []
     judge_indices: List[int] = []
     details: List[Dict[str, Any]] = []
@@ -195,14 +193,14 @@ def _evaluate_model_rows(
             )
             correctness_strict_ok += int(strict_report.ok)
             if not strict_report.ok:
-                bem_inputs.append(
+                matcher_inputs.append(
                     {
                         "question": str(row.get("question") or ""),
                         "reference_answer": str(row.get("reference_answer") or "").strip(),
                         "answer": extracted_answer,
                     }
                 )
-                bem_indices.append(idx)
+                matcher_indices.append(idx)
         if pred_label == "answerable" and extracted_answer:
             judge_inputs.append(
                 {
@@ -219,17 +217,17 @@ def _evaluate_model_rows(
                 "pred_answerability": pred_label,
                 "answerability_match": None if pred_label is None or not gold_label else bool(pred_label == gold_label),
                 "strict_report": strict_report,
-                "correctness_bem_report": None,
+                "correctness_matcher_report": None,
                 "judge_payload": None,
                 "semantic_decision": None,
                 "semantic_margin": None,
             }
         )
 
-    if bem_inputs:
-        bem_reports = bem_judge.review_batch(bem_inputs)
-        for bem_idx, detail_idx in enumerate(bem_indices):
-            details[detail_idx]["correctness_bem_report"] = bem_reports[bem_idx]
+    if matcher_inputs:
+        matcher_reports = matcher.review_batch(matcher_inputs)
+        for matcher_idx, detail_idx in enumerate(matcher_indices):
+            details[detail_idx]["correctness_matcher_report"] = matcher_reports[matcher_idx]
 
     if judge_inputs:
         judged_rows, _ = judge.judge(judge_inputs)
@@ -239,8 +237,8 @@ def _evaluate_model_rows(
             details[detail_idx]["semantic_decision"] = _semantic_decision(judge_payload, decision_source=decision_source)
             details[detail_idx]["semantic_margin"] = judge_payload.get("margin")
 
-    correctness_bem_review_total = 0
-    correctness_bem_positive = 0
+    correctness_matcher_review_total = 0
+    correctness_matcher_positive = 0
     correctness_reviewed_ok = 0
     semantic_total = 0
     semantic_yes = 0
@@ -249,14 +247,14 @@ def _evaluate_model_rows(
 
     for row in details:
         strict_report = row["strict_report"]
-        bem_report: Optional[BemReviewReport] = row["correctness_bem_report"]
+        matcher_report: Optional[TransformerMatcherReviewReport] = row["correctness_matcher_report"]
         reviewed_ok = None
         if strict_report is not None:
             reviewed_ok = bool(strict_report.ok)
-            if not strict_report.ok and bem_report is not None:
-                correctness_bem_review_total += 1
-                correctness_bem_positive += int(bool(bem_report.ok))
-                reviewed_ok = bool(bem_report.ok)
+            if not strict_report.ok and matcher_report is not None:
+                correctness_matcher_review_total += 1
+                correctness_matcher_positive += int(bool(matcher_report.ok))
+                reviewed_ok = bool(matcher_report.ok)
             correctness_reviewed_ok += int(bool(reviewed_ok))
 
         semantic_decision = row["semantic_decision"]
@@ -294,9 +292,9 @@ def _evaluate_model_rows(
                 "correctness_ok": None if strict_report is None else strict_report.ok,
                 "correctness_exact_match": None if strict_report is None else strict_report.exact_match,
                 "correctness_token_f1": None if strict_report is None else strict_report.token_f1,
-                "correctness_bem_used": None if bem_report is None else bem_report.used,
-                "correctness_bem_ok": None if bem_report is None else bem_report.ok,
-                "correctness_bem_probability": None if bem_report is None else bem_report.equivalent_probability,
+                "correctness_matcher_used": None if matcher_report is None else matcher_report.used,
+                "correctness_matcher_ok": None if matcher_report is None else matcher_report.ok,
+                "correctness_matcher_score": None if matcher_report is None else matcher_report.match_score,
                 "correctness_reviewed_ok": reviewed_ok,
                 "semantic_decision": semantic_decision,
                 "semantic_margin": semantic_margin,
@@ -313,9 +311,9 @@ def _evaluate_model_rows(
         "correctness_total": correctness_total,
         "correctness_strict_ok": correctness_strict_ok,
         "correctness_strict_rate": _safe_rate(correctness_strict_ok, correctness_total),
-        "correctness_bem_review_total": correctness_bem_review_total,
-        "correctness_bem_positive": correctness_bem_positive,
-        "correctness_bem_positive_rate": _safe_rate(correctness_bem_positive, correctness_bem_review_total),
+        "correctness_matcher_review_total": correctness_matcher_review_total,
+        "correctness_matcher_positive": correctness_matcher_positive,
+        "correctness_matcher_positive_rate": _safe_rate(correctness_matcher_positive, correctness_matcher_review_total),
         "correctness_reviewed_ok": correctness_reviewed_ok,
         "correctness_reviewed_rate": _safe_rate(correctness_reviewed_ok, correctness_total),
         "semantic_total": semantic_total,
@@ -345,7 +343,7 @@ def main() -> None:
     extraction_cfg = _build_extraction_cfg(args)
     extractor = OpenAICompatibleTextGenerator(cfg=extraction_cfg.to_api_config(), api_key=api_key)
     judge = _build_answer_judge(args)
-    bem_judge = _build_bem_judge(args)
+    matcher = _build_transformer_matcher(args)
     correctness_cfg = CorrectnessConfig(semantic_match_f1_threshold=args.semantic_match_f1_threshold)
 
     summary_rows: List[Dict[str, Any]] = []
@@ -359,7 +357,7 @@ def main() -> None:
             extractor=extractor,
             extraction_cfg=extraction_cfg,
             judge=judge,
-            bem_judge=bem_judge,
+            matcher=matcher,
             decision_source=args.semantic_decision_source,
             correctness_cfg=correctness_cfg,
         )

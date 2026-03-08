@@ -18,7 +18,11 @@ from qa_judge.structured import StructuredAnswerJudge
 from qa_protocol import parse_structured_output, validate_structured_payload
 
 from .common import extract_knowledge_question_from_infer_prompt, load_dataset_split, write_csv
-from .correctness_bem import AnswerEquivalenceBemJudge, BemConfig, BemReviewReport
+from .correctness_transformer_matcher import (
+    AnswerEquivalenceTransformerMatcher,
+    TransformerMatcherConfig,
+    TransformerMatcherReviewReport,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,10 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_fail_as_negative)
     parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_check_answer_type)
     parser.add_argument("--qa_spacy_model", type=str, default=JudgeConfig.qa_spacy_model)
-    parser.add_argument("--bem_model_name", type=str, default=BemConfig.model_name)
-    parser.add_argument("--bem_device", type=str, default=BemConfig.device)
-    parser.add_argument("--bem_batch_size", type=int, default=BemConfig.batch_size)
-    parser.add_argument("--bem_max_length", type=int, default=BemConfig.max_length)
+    parser.add_argument("--matcher_model_name", type=str, default=TransformerMatcherConfig.model_name)
     parser.add_argument("--metrics_out", type=str, required=True, help="Per-model summary CSV path.")
     parser.add_argument("--details_out", type=str, default=None, help="Optional per-sample details JSONL path.")
     parser.add_argument("--confidence_out", type=str, default=None, help="Optional confidence correlation JSON path.")
@@ -222,13 +223,10 @@ def _build_structured_judge(args: argparse.Namespace) -> Optional[StructuredAnsw
     )
 
 
-def _build_bem_judge(args: argparse.Namespace) -> AnswerEquivalenceBemJudge:
-    return AnswerEquivalenceBemJudge(
-        BemConfig(
-            model_name=args.bem_model_name,
-            device=args.bem_device,
-            batch_size=args.bem_batch_size,
-            max_length=args.bem_max_length,
+def _build_transformer_matcher(args: argparse.Namespace) -> AnswerEquivalenceTransformerMatcher:
+    return AnswerEquivalenceTransformerMatcher(
+        TransformerMatcherConfig(
+            model_name=args.matcher_model_name,
         )
     )
 
@@ -237,7 +235,7 @@ def _evaluate_one_model(
     *,
     rows: Sequence[Dict[str, Any]],
     structured_judge: Optional[StructuredAnswerJudge],
-    bem_judge: AnswerEquivalenceBemJudge,
+    matcher: AnswerEquivalenceTransformerMatcher,
     correctness_cfg: CorrectnessConfig,
     semantic_decision_source: str,
     enable_semantics: bool,
@@ -245,8 +243,8 @@ def _evaluate_one_model(
     prepared: List[Dict[str, Any]] = []
     semantic_inputs: List[Dict[str, Any]] = []
     semantic_prepared_indices: List[int] = []
-    bem_inputs: List[Dict[str, str]] = []
-    bem_prepared_indices: List[int] = []
+    matcher_inputs: List[Dict[str, str]] = []
+    matcher_prepared_indices: List[int] = []
 
     for row in rows:
         raw_text = str(row.get("raw_output") or row.get("answer") or "").strip()
@@ -284,14 +282,14 @@ def _evaluate_one_model(
                         cfg=correctness_cfg,
                     )
                     if not correctness_report.ok:
-                        bem_inputs.append(
+                        matcher_inputs.append(
                             {
                                 "question": question,
                                 "reference_answer": reference_answer,
                                 "answer": output.answer,
                             }
                         )
-                        bem_prepared_indices.append(len(prepared))
+                        matcher_prepared_indices.append(len(prepared))
                 should_run_semantics = bool(
                     enable_semantics and protocol_report.ok and len(output.evidence) > 0 and bool(question)
                 )
@@ -317,16 +315,16 @@ def _evaluate_one_model(
                 "protocol_report": protocol_report,
                 "evidence_report": evidence_report,
                 "correctness_report": correctness_report,
-                "correctness_bem_report": None,
+                "correctness_matcher_report": None,
                 "should_run_semantics": should_run_semantics,
                 "semantics_report": _empty_semantic_report(),
             }
         )
 
-    if bem_inputs:
-        bem_reports = bem_judge.review_batch(bem_inputs)
-        for bem_idx, prepared_idx in enumerate(bem_prepared_indices):
-            prepared[prepared_idx]["correctness_bem_report"] = bem_reports[bem_idx]
+    if matcher_inputs:
+        matcher_reports = matcher.review_batch(matcher_inputs)
+        for matcher_idx, prepared_idx in enumerate(matcher_prepared_indices):
+            prepared[prepared_idx]["correctness_matcher_report"] = matcher_reports[matcher_idx]
 
     if semantic_inputs and enable_semantics:
         semantic_reports = evaluate_structured_semantics_batch(
@@ -347,8 +345,8 @@ def _evaluate_one_model(
     evidence_ok = 0
     correctness_total = 0
     correctness_strict_ok = 0
-    correctness_bem_review_total = 0
-    correctness_bem_positive = 0
+    correctness_matcher_review_total = 0
+    correctness_matcher_positive = 0
     correctness_reviewed_ok = 0
     semantic_total = 0
     semantic_yes = 0
@@ -382,7 +380,7 @@ def _evaluate_one_model(
         protocol_report = item["protocol_report"]
         evidence_report = item["evidence_report"]
         correctness_report = item["correctness_report"]
-        correctness_bem_report: Optional[BemReviewReport] = item["correctness_bem_report"]
+        correctness_matcher_report: Optional[TransformerMatcherReviewReport] = item["correctness_matcher_report"]
         semantics_report: SemanticCheckReport = item["semantics_report"]
         gold_answerability = item["gold_answerability"]
         attempt_count = int(row.get("attempt_count") or 1)
@@ -418,10 +416,10 @@ def _evaluate_one_model(
                 correctness_total += 1
                 correctness_strict_ok += int(correctness_report.ok)
                 reviewed_ok = bool(correctness_report.ok)
-                if not correctness_report.ok and correctness_bem_report is not None:
-                    correctness_bem_review_total += 1
-                    correctness_bem_positive += int(bool(correctness_bem_report.ok))
-                    reviewed_ok = bool(correctness_bem_report.ok)
+                if not correctness_report.ok and correctness_matcher_report is not None:
+                    correctness_matcher_review_total += 1
+                    correctness_matcher_positive += int(bool(correctness_matcher_report.ok))
+                    reviewed_ok = bool(correctness_matcher_report.ok)
                 correctness_reviewed_ok += int(bool(reviewed_ok))
             if enable_semantics and item["should_run_semantics"] and semantics_report.decision is not None:
                 semantic_total += 1
@@ -489,11 +487,10 @@ def _evaluate_one_model(
                 "correctness_ok": None if correctness_report is None else correctness_report.ok,
                 "correctness_exact_match": None if correctness_report is None else correctness_report.exact_match,
                 "correctness_token_f1": None if correctness_report is None else correctness_report.token_f1,
-                "correctness_bem_used": None if correctness_bem_report is None else correctness_bem_report.used,
-                "correctness_bem_ok": None if correctness_bem_report is None else correctness_bem_report.ok,
-                "correctness_bem_label_index": None if correctness_bem_report is None else correctness_bem_report.label_index,
-                "correctness_bem_probability": None if correctness_bem_report is None else correctness_bem_report.equivalent_probability,
-                "correctness_bem_issues": [] if correctness_bem_report is None else list(correctness_bem_report.issues),
+                "correctness_matcher_used": None if correctness_matcher_report is None else correctness_matcher_report.used,
+                "correctness_matcher_ok": None if correctness_matcher_report is None else correctness_matcher_report.ok,
+                "correctness_matcher_score": None if correctness_matcher_report is None else correctness_matcher_report.match_score,
+                "correctness_matcher_issues": [] if correctness_matcher_report is None else list(correctness_matcher_report.issues),
                 "correctness_reviewed_ok": reviewed_ok,
                 "semantic_ok": semantics_report.ok if enable_semantics else None,
                 "semantic_decision": semantics_report.decision if enable_semantics else None,
@@ -523,9 +520,9 @@ def _evaluate_one_model(
         "correctness_total": correctness_total,
         "correctness_strict_ok": correctness_strict_ok,
         "correctness_strict_rate": _safe_rate(correctness_strict_ok, correctness_total),
-        "correctness_bem_review_total": correctness_bem_review_total,
-        "correctness_bem_positive": correctness_bem_positive,
-        "correctness_bem_positive_rate": _safe_rate(correctness_bem_positive, correctness_bem_review_total),
+        "correctness_matcher_review_total": correctness_matcher_review_total,
+        "correctness_matcher_positive": correctness_matcher_positive,
+        "correctness_matcher_positive_rate": _safe_rate(correctness_matcher_positive, correctness_matcher_review_total),
         "correctness_reviewed_ok": correctness_reviewed_ok,
         "correctness_reviewed_rate": _safe_rate(correctness_reviewed_ok, correctness_total),
         "semantic_total": semantic_total,
@@ -598,7 +595,7 @@ def main() -> None:
         grouped.setdefault(_extract_model_key(row), []).append(row)
 
     structured_judge = _build_structured_judge(args)
-    bem_judge = _build_bem_judge(args)
+    matcher = _build_transformer_matcher(args)
     correctness_cfg = CorrectnessConfig(semantic_match_f1_threshold=args.semantic_match_f1_threshold)
 
     summary_rows: List[Dict[str, Any]] = []
@@ -609,7 +606,7 @@ def main() -> None:
         metrics, details, confidence_metrics = _evaluate_one_model(
             rows=model_rows,
             structured_judge=structured_judge,
-            bem_judge=bem_judge,
+            matcher=matcher,
             correctness_cfg=correctness_cfg,
             semantic_decision_source=args.semantic_decision_source,
             enable_semantics=bool(args.enable_semantics),

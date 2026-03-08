@@ -18,9 +18,13 @@ try:
         load_structured_generation_items,
         normalize_generated_row,
     )
-    from model_eval.correctness_bem import AnswerEquivalenceBemJudge, BemConfig
+    from model_eval.correctness_transformer_matcher import (
+        AnswerEquivalenceTransformerMatcher,
+        TransformerMatcherConfig,
+    )
     from model_eval.generate_structured_answers import _build_prompt, _generate_batch_with_retry
-    from model_eval.merge_eval_curves import _merge_rows
+    from model_eval.merge_eval_curves import _project_rows
+    from llm_textgen.generator import UnifiedTextGenerator
 except ModuleNotFoundError:  # pragma: no cover
     check_answer_correctness = None
     CorrectnessConfig = None
@@ -29,11 +33,12 @@ except ModuleNotFoundError:  # pragma: no cover
     load_dataset_split = None
     load_structured_generation_items = None
     normalize_generated_row = None
-    AnswerEquivalenceBemJudge = None
-    BemConfig = None
+    AnswerEquivalenceTransformerMatcher = None
+    TransformerMatcherConfig = None
     _build_prompt = None
     _generate_batch_with_retry = None
-    _merge_rows = None
+    _project_rows = None
+    UnifiedTextGenerator = None
 
 
 def _write_jsonl(path: Path, rows) -> None:
@@ -52,11 +57,12 @@ def _write_jsonl(path: Path, rows) -> None:
             normalize_generated_row,
             check_answer_correctness,
             parse_answer_extraction_output,
-            AnswerEquivalenceBemJudge,
-            BemConfig,
+            AnswerEquivalenceTransformerMatcher,
+            TransformerMatcherConfig,
             _build_prompt,
             _generate_batch_with_retry,
-            _merge_rows,
+            _project_rows,
+            UnifiedTextGenerator,
         )
     ),
     "model_eval dependencies are not available",
@@ -156,40 +162,27 @@ class ModelEvalRefactorTests(unittest.TestCase):
         self.assertEqual(result.short_answer, "")
         self.assertTrue(result.refusal_detected)
 
-    def test_bem_judge_reviews_batch_with_mocked_model(self) -> None:
-        class DummyTokenizer:
-            def __call__(self, **kwargs):
-                import torch
+    def test_transformer_matcher_reviews_batch_with_mocked_backend(self) -> None:
+        class DummyMatcher:
+            def __init__(self, model_name: str) -> None:
+                self.model_name = model_name
 
-                return {
-                    "input_ids": torch.ones((2, 4), dtype=torch.long),
-                    "attention_mask": torch.ones((2, 4), dtype=torch.long),
-                }
+            def get_score(self, reference_answer: str, candidate_answer: str, question: str) -> float:
+                return 0.9 if question == "Q1" else 0.1
 
-        class DummyModel:
-            def __init__(self) -> None:
-                self.config = Namespace(id2label={0: "not_equivalent", 1: "equivalent"}, num_labels=2)
+            def transformer_match(self, reference_answers, candidate_answer: str, question: str) -> bool:
+                return question == "Q1"
 
-            def to(self, device):
-                return self
-
-            def eval(self):
-                return self
-
-            def __call__(self, **kwargs):
-                import torch
-
-                return Namespace(logits=torch.tensor([[0.1, 1.2], [1.4, 0.2]], dtype=torch.float32))
-
-        with patch("model_eval.correctness_bem.AutoTokenizer.from_pretrained", return_value=DummyTokenizer()):
-            with patch("model_eval.correctness_bem.AutoModelForSequenceClassification.from_pretrained", return_value=DummyModel()):
-                judge = AnswerEquivalenceBemJudge(BemConfig(device="cpu", batch_size=2))
-                reports = judge.review_batch(
-                    [
-                        {"question": "Q1", "reference_answer": "A1", "answer": "B1"},
-                        {"question": "Q2", "reference_answer": "A2", "answer": "B2"},
-                    ]
-                )
+        with patch("model_eval.correctness_transformer_matcher.QaMetricsTransformerMatcher", DummyMatcher):
+            judge = AnswerEquivalenceTransformerMatcher(
+                TransformerMatcherConfig(model_name="zli12321/answer_equivalence_roberta-large")
+            )
+            reports = judge.review_batch(
+                [
+                    {"question": "Q1", "reference_answer": "A1", "answer": "B1"},
+                    {"question": "Q2", "reference_answer": "A2", "answer": "B2"},
+                ]
+            )
         self.assertEqual(len(reports), 2)
         self.assertTrue(reports[0].ok)
         self.assertFalse(reports[1].ok)
@@ -258,21 +251,22 @@ class ModelEvalRefactorTests(unittest.TestCase):
         self.assertFalse(out[0]["generation_failed"])
         self.assertEqual(out[0]["attempt_count"], 2)
 
-    def test_merge_rows_prefixes_metrics_and_fills_missing_later(self) -> None:
-        merged = {}
-        _merge_rows(
-            merged,
-            rows=[{"model_tag": "base", "model_step": "0", "model_path": "m", "metric_a": "1.0"}],
-            prefix="base_protocol",
+    def test_project_rows_uses_sft_schema_and_fills_nan(self) -> None:
+        schema = ["model_tag", "model_step", "model_path", "num_rows", "parse_ok_rate"]
+        rows = [{"model_tag": "base", "model_step": "0", "model_path": "m", "num_rows": "10"}]
+        projected = _project_rows(rows, schema)
+        self.assertEqual(projected[0]["model_tag"], "base")
+        self.assertEqual(projected[0]["num_rows"], "10")
+        self.assertEqual(projected[0]["parse_ok_rate"], "nan")
+
+    def test_qa_prompt_can_append_refusal_instruction(self) -> None:
+        prompt = UnifiedTextGenerator._build_qa_prompt(
+            knowledge="Doc: Alice founded Acme.",
+            question="Who founded Acme?",
+            encourage_refusal=True,
         )
-        _merge_rows(
-            merged,
-            rows=[{"model_tag": "sft", "model_step": "100", "model_path": "m2", "metric_b": "2.0"}],
-            prefix="sft_structured",
-        )
-        self.assertIn(("base", "0", "m"), merged)
-        self.assertEqual(merged[("base", "0", "m")]["base_protocol__metric_a"], "1.0")
-        self.assertEqual(merged[("sft", "100", "m2")]["sft_structured__metric_b"], "2.0")
+        self.assertIn("If the provided knowledge is insufficient", prompt)
+        self.assertTrue(prompt.endswith("Answer: "))
 
 
 if __name__ == "__main__":

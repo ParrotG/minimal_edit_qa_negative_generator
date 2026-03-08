@@ -64,7 +64,7 @@ def build_answer_extraction_prompt(*, question: str, raw_answer: str) -> str:
         "Instructions:\n"
         "- Determine whether the model answer refuses to answer, says it does not know, or states that the information is missing.\n"
         "- If the answer is a refusal or non-answer, set refusal_detected to true and short_answer to an empty string.\n"
-        "- If the answer contains a real answer, set refusal_detected to false and extract the minimal answer phrase needed to answer the question.\n"
+        "- If the answer contains a real answer, set refusal_detected to false and extract the shortest complete answer span needed to answer the question.\n"
         "- Do not include explanations outside the JSON.\n\n"
         f"Question: {question}\n"
         "Model answer:\n"

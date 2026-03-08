@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from .common import write_csv
 
@@ -25,47 +25,30 @@ def _read_csv(path: str) -> List[Dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def _merge_rows(
-    merged: Dict[Tuple[str, str, str], Dict[str, str]],
-    *,
-    rows: List[Dict[str, str]],
-    prefix: str,
-) -> None:
+def _project_rows(rows: List[Dict[str, str]], schema_columns: List[str]) -> List[Dict[str, str]]:
+    projected: List[Dict[str, str]] = []
     for row in rows:
-        key = tuple(str(row.get(field) or "") for field in KEY_FIELDS)
-        target = merged.setdefault(
-            key,
-            {
-                "model_tag": key[0],
-                "model_step": key[1],
-                "model_path": key[2],
-            },
-        )
-        for field, value in row.items():
-            if field in KEY_FIELDS:
-                continue
-            target[f"{prefix}__{field}"] = value if value != "" else "nan"
+        out: Dict[str, str] = {}
+        for col in schema_columns:
+            value = row.get(col, "nan")
+            out[col] = value if value != "" else "nan"
+        projected.append(out)
+    return projected
 
 
 def main() -> None:
     args = parse_args()
-    merged: Dict[Tuple[str, str, str], Dict[str, str]] = {}
-    _merge_rows(merged, rows=_read_csv(args.sft_structured_csv), prefix="sft_structured")
-    _merge_rows(merged, rows=_read_csv(args.base_protocol_csv), prefix="base_protocol")
-    _merge_rows(merged, rows=_read_csv(args.base_task_think_csv), prefix="base_task_think")
-    _merge_rows(merged, rows=_read_csv(args.base_task_nothink_csv), prefix="base_task_nothink")
-
-    all_columns = set()
-    for row in merged.values():
-        all_columns.update(row.keys())
-    ordered_metric_columns = sorted(col for col in all_columns if col not in KEY_FIELDS)
-
+    sft_rows = _read_csv(args.sft_structured_csv)
+    if not sft_rows:
+        raise RuntimeError("sft_structured_csv is empty.")
+    schema_columns = list(sft_rows[0].keys())
     out_rows: List[Dict[str, str]] = []
-    for key in sorted(merged.keys(), key=lambda item: (int(item[1] or 0), item[0], item[2])):
-        row = dict(merged[key])
-        for col in ordered_metric_columns:
-            row.setdefault(col, "nan")
-        out_rows.append(row)
+    out_rows.extend(_project_rows(sft_rows, schema_columns))
+    out_rows.extend(_project_rows(_read_csv(args.base_protocol_csv), schema_columns))
+    out_rows.extend(_project_rows(_read_csv(args.base_task_think_csv), schema_columns))
+    out_rows.extend(_project_rows(_read_csv(args.base_task_nothink_csv), schema_columns))
+
+    out_rows.sort(key=lambda row: (int(str(row.get("model_step") or "0")), str(row.get("model_tag") or ""), str(row.get("model_path") or "")))
 
     write_csv(out_rows, args.out_csv)
     print(f"Saved merged comparison table to: {args.out_csv}")
