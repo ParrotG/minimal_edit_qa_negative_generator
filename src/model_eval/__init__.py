@@ -1,2 +1,1 @@
-"""Evaluation and generation utilities decoupled from dpo_trainer."""
-
+"""Evaluation and reporting utilities for the grounded-QA SFT workflow."""

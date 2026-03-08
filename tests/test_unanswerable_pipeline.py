@@ -153,13 +153,17 @@ def _example() -> QaExample:
 class TaggingTests(unittest.TestCase):
     def test_tagging_uses_two_independent_salted_assignments(self) -> None:
         source_id = "hotpot-123"
-        data_split = assign_data_split_name(source_id, DataSplitConfig())
+        data_split = assign_data_split_name(source_id, "validation", DataSplitConfig())
         answerability_split = assign_answerability_split_name(source_id, AnswerabilitySplitConfig())
-        self.assertIn(data_split, {"validation", "test", "train_sft_raw", "train_dpo_raw"})
+        self.assertIn(data_split, {"validation", "test"})
+        self.assertEqual(assign_data_split_name(source_id, "train", DataSplitConfig()), "train_sft_raw")
         self.assertIn(answerability_split, {"answerable", "unanswerable", "both"})
-        self.assertNotEqual(
-            assign_data_split_name(source_id, DataSplitConfig(hash_salt="data_split")),
-            assign_data_split_name(source_id, DataSplitConfig(hash_salt="different_data_split")),
+        self.assertTrue(
+            any(
+                assign_data_split_name(candidate_id, "validation", DataSplitConfig(hash_salt="data_split"))
+                != assign_data_split_name(candidate_id, "validation", DataSplitConfig(hash_salt="different_data_split"))
+                for candidate_id in ("hotpot-123", "hotpot-456", "hotpot-789", "hotpot-999")
+            )
         )
 
 

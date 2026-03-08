@@ -5,6 +5,7 @@ import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+from qa_protocol import parse_structured_output
 
 from dataio import optional_str, pick_first_non_empty_str, read_json, read_jsonl
 
@@ -29,6 +30,12 @@ def safe_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def optional_stripped(value: Any) -> str:
+    """Return a stripped string or an empty string for null-like inputs."""
+
+    return str(value or "").strip()
 
 
 def load_dataset_split(data_path: str, split: str) -> Dataset:
@@ -117,6 +124,47 @@ def _extract_answerability_label(row: Dict[str, Any]) -> str:
     return ""
 
 
+def infer_eval_track(row: Dict[str, Any]) -> str:
+    """Infer the evaluation track for a generated/evaluated row."""
+
+    explicit = optional_stripped(row.get("eval_track"))
+    if explicit:
+        return explicit
+
+    prompt_mode = optional_stripped(row.get("prompt_mode"))
+    if prompt_mode in {"teacher", "teacher_fewshot"}:
+        return "base_protocol"
+    if "parsed_output" in row or prompt_mode == "infer":
+        return "sft_structured"
+    if "answer" in row:
+        return "base_task"
+    return ""
+
+
+def infer_eval_variant(row: Dict[str, Any]) -> str:
+    """Infer the evaluation variant for a generated/evaluated row."""
+
+    explicit = optional_stripped(row.get("eval_variant"))
+    if explicit:
+        return explicit
+
+    prompt_mode = optional_stripped(row.get("prompt_mode"))
+    if prompt_mode in {"teacher", "teacher_fewshot"}:
+        return "fewshot_retry"
+    if prompt_mode == "infer" or "parsed_output" in row:
+        return "checkpoint"
+    if row.get("enable_thinking") is True:
+        return "think"
+    if row.get("enable_thinking") is False:
+        return "no_think"
+    thinking_hint = optional_stripped(row.get("thinking_mode")).lower()
+    if thinking_hint in {"think", "enabled"}:
+        return "think"
+    if thinking_hint in {"no_think", "disabled"}:
+        return "no_think"
+    return ""
+
+
 def _extract_reference_answer(row: Dict[str, Any]) -> str:
     reference = pick_first_non_empty_str(
         row,
@@ -175,6 +223,8 @@ def extract_generation_item(row: Dict[str, Any], idx: int) -> Optional[Dict[str,
         "reference_answer": reference_answer,
         "answerability_label": _extract_answerability_label(row),
         "data_split": str(row.get("data_split") or "").strip(),
+        "eval_track": infer_eval_track(row),
+        "eval_variant": infer_eval_variant(row),
     }
 
 
@@ -260,6 +310,40 @@ def _extract_generated_answer(row: Dict[str, Any], answer_source: str) -> str:
     return pick_first_non_empty_str(row, ["answer", "actual_output", "raw_output"])
 
 
+def extract_structured_output_text(row: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Extract rationale-plus-answer text from a structured output row."""
+
+    parsed_output = row.get("parsed_output")
+    payload: Dict[str, Any] = {}
+    parse_ok = False
+    if isinstance(parsed_output, dict):
+        payload = dict(parsed_output)
+        parse_ok = True
+    else:
+        raw_output = pick_first_non_empty_str(row, ["raw_output", "answer", "actual_output"])
+        if raw_output:
+            parse_result = parse_structured_output(raw_output)
+            if parse_result.ok and parse_result.parsed is not None:
+                payload = parse_result.parsed.model_dump(mode="json")
+                parse_ok = True
+
+    rationale = optional_stripped(payload.get("rationale"))
+    answer = optional_stripped(payload.get("answer"))
+    text = ""
+    if rationale and answer:
+        text = f"{rationale}\nTherefore the answer is {answer}"
+    elif answer:
+        text = answer
+
+    meta = {
+        "structured_parse_ok": parse_ok,
+        "structured_answer_present": bool(answer),
+        "structured_rationale_present": bool(rationale),
+        "structured_extract_failed": not bool(text),
+    }
+    return text, meta
+
+
 def normalize_generated_row(
     row: Dict[str, Any],
     idx: int,
@@ -295,6 +379,8 @@ def normalize_generated_row(
         "model_tag": model_tag,
         "model_step": model_step,
         "model_path": model_path,
+        "eval_track": infer_eval_track(row),
+        "eval_variant": infer_eval_variant(row),
         "sample_id": sample_id,
         "source_id": source_id,
         "question": question,
@@ -330,12 +416,18 @@ def load_generated_rows(
     return out
 
 
-def group_rows_by_model(rows: Sequence[Dict[str, Any]]) -> Dict[Tuple[str, int, str], List[Dict[str, Any]]]:
-    """Group rows by (model_tag, model_step, model_path)."""
+def group_rows_by_model(rows: Sequence[Dict[str, Any]]) -> Dict[Tuple[str, int, str, str, str], List[Dict[str, Any]]]:
+    """Group rows by model identity plus evaluation track metadata."""
 
-    grouped: Dict[Tuple[str, int, str], List[Dict[str, Any]]] = {}
+    grouped: Dict[Tuple[str, int, str, str, str], List[Dict[str, Any]]] = {}
     for row in rows:
-        key = (str(row["model_tag"]), int(row["model_step"]), str(row["model_path"]))
+        key = (
+            str(row["model_tag"]),
+            int(row["model_step"]),
+            str(row["model_path"]),
+            str(row.get("eval_track") or ""),
+            str(row.get("eval_variant") or ""),
+        )
         grouped.setdefault(key, []).append(dict(row))
     return grouped
 

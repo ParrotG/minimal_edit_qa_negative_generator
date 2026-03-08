@@ -7,7 +7,7 @@ from typing import Dict, List
 from .common import write_csv
 
 
-KEY_FIELDS = ("model_tag", "model_step", "model_path")
+KEY_FIELDS = ("model_tag", "model_step", "model_path", "eval_track", "eval_variant")
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,8 +36,9 @@ def _project_rows(rows: List[Dict[str, str]], schema_columns: List[str]) -> List
     return projected
 
 
-def main() -> None:
-    args = parse_args()
+def merge_curve_rows(args: argparse.Namespace) -> List[Dict[str, str]]:
+    """Merge multiple curve CSV files into one vertically stacked comparison table."""
+
     sft_rows = _read_csv(args.sft_structured_csv)
     if not sft_rows:
         raise RuntimeError("sft_structured_csv is empty.")
@@ -48,7 +49,21 @@ def main() -> None:
     out_rows.extend(_project_rows(_read_csv(args.base_task_think_csv), schema_columns))
     out_rows.extend(_project_rows(_read_csv(args.base_task_nothink_csv), schema_columns))
 
-    out_rows.sort(key=lambda row: (int(str(row.get("model_step") or "0")), str(row.get("model_tag") or ""), str(row.get("model_path") or "")))
+    out_rows.sort(
+        key=lambda row: (
+            str(row.get("eval_track") or ""),
+            int(str(row.get("model_step") or "0")),
+            str(row.get("eval_variant") or ""),
+            str(row.get("model_path") or ""),
+        )
+    )
+
+    return out_rows
+
+
+def main() -> None:
+    args = parse_args()
+    out_rows = merge_curve_rows(args)
 
     write_csv(out_rows, args.out_csv)
     print(f"Saved merged comparison table to: {args.out_csv}")

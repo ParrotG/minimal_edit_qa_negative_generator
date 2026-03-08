@@ -270,6 +270,8 @@ def _evaluate_model_rows(
                 "model_tag": row.get("model_tag"),
                 "model_step": row.get("model_step"),
                 "model_path": row.get("model_path"),
+                "eval_track": row.get("eval_track"),
+                "eval_variant": row.get("eval_variant"),
                 "sample_id": row.get("sample_id"),
                 "source_id": row.get("source_id"),
                 "data_split": row.get("data_split"),
@@ -323,8 +325,9 @@ def _evaluate_model_rows(
     return metrics, output_rows
 
 
-def main() -> None:
-    args = parse_args()
+def run_task_content_baseline(args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Evaluate base task generations and return summary and detail rows."""
+
     rows = load_generated_rows(
         generated_path=args.generated_path,
         split=args.split,
@@ -348,9 +351,9 @@ def main() -> None:
 
     summary_rows: List[Dict[str, Any]] = []
     detail_rows: List[Dict[str, Any]] = []
-    for (model_tag, model_step, model_path), model_rows in sorted(
+    for (model_tag, model_step, model_path, eval_track, eval_variant), model_rows in sorted(
         grouped.items(),
-        key=lambda item: (item[0][1], item[0][0], item[0][2]),
+        key=lambda item: (item[0][3], item[0][1], item[0][4], item[0][0], item[0][2]),
     ):
         metrics, details = _evaluate_model_rows(
             rows=model_rows,
@@ -366,10 +369,19 @@ def main() -> None:
                 "model_tag": model_tag,
                 "model_step": model_step,
                 "model_path": model_path,
+                "eval_track": eval_track,
+                "eval_variant": eval_variant,
                 **metrics,
             }
         )
         detail_rows.extend(details)
+
+    return summary_rows, detail_rows
+
+
+def main() -> None:
+    args = parse_args()
+    summary_rows, detail_rows = run_task_content_baseline(args)
 
     write_csv(summary_rows, args.metrics_out)
     print(f"Saved metrics to: {args.metrics_out}")

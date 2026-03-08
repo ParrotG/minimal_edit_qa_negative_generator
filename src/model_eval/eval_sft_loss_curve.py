@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include_base", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--max_length", type=int, default=1024)
+    parser.add_argument("--eval_track", type=str, default="sft_structured", help="Evaluation track label written into the curve rows.")
+    parser.add_argument("--eval_variant", type=str, default="checkpoint", help="Evaluation variant label written into the curve rows.")
     parser.add_argument("--out_csv", type=str, required=True, help="Per-model loss curve CSV path.")
     parser.add_argument("--details_out", type=str, default=None, help="Optional per-sample loss details JSONL path.")
     return parser.parse_args()
@@ -210,6 +212,8 @@ def _evaluate_one_model(
                     "model_tag": model_spec.tag,
                     "model_step": int(model_spec.step),
                     "model_path": model_spec.display_name,
+                    "eval_track": "sft_structured",
+                    "eval_variant": "checkpoint",
                     "sample_id": row["sample_id"],
                     "source_id": row["source_id"],
                     "num_completion_tokens": token_count,
@@ -229,6 +233,8 @@ def _evaluate_one_model(
         "model_tag": model_spec.tag,
         "model_step": int(model_spec.step),
         "model_path": model_spec.display_name,
+        "eval_track": "sft_structured",
+        "eval_variant": "checkpoint",
         "num_rows": len(rows),
         "num_used_rows": len(row_losses),
         "num_skipped_missing_completion": num_skipped_missing_completion,
@@ -239,8 +245,9 @@ def _evaluate_one_model(
     return summary, details
 
 
-def main() -> None:
-    args = parse_args()
+def run_sft_loss_curve(args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Compute SFT loss summaries and optional per-sample detail rows."""
+
     if int(args.max_length) <= 0:
         raise ValueError("--max_length must be positive.")
 
@@ -271,8 +278,20 @@ def main() -> None:
             max_length=args.max_length,
             seed=args.seed,
         )
+        summary["eval_track"] = str(args.eval_track or "sft_structured")
+        summary["eval_variant"] = str(args.eval_variant or "checkpoint")
+        for row in details:
+            row["eval_track"] = str(args.eval_track or "sft_structured")
+            row["eval_variant"] = str(args.eval_variant or "checkpoint")
         summary_rows.append(summary)
         detail_rows.extend(details)
+
+    return summary_rows, detail_rows
+
+
+def main() -> None:
+    args = parse_args()
+    summary_rows, detail_rows = run_sft_loss_curve(args)
 
     write_csv(summary_rows, args.out_csv)
     print(f"Saved SFT loss curve to: {args.out_csv}")

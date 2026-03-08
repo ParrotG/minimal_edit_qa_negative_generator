@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
         "--in_jsonl",
         type=str,
         default=None,
-        help="Legacy single-input mode. If provided without per-split paths, rows are split by `data_split`.",
+        help="Optional single-input mode. If provided without per-split paths, rows are split by `data_split`.",
     )
     parser.add_argument(
         "--train_paths",

@@ -255,6 +255,7 @@ def build_examples_from_tagged_row(
 
     answerability_split = str(row.get("answerability_split") or "").strip()
     data_split = str(row.get("data_split") or "").strip() or None
+    hotpot_source_split = str(row.get("hotpot_source_split") or "").strip() or None
     scaffold = build_answerable_example(row, construct_cfg)
     if scaffold is None:
         return []
@@ -268,6 +269,8 @@ def build_examples_from_tagged_row(
                 answerability_split=answerability_split or None,
             )
         )
+        if hotpot_source_split:
+            out[-1].metadata["hotpot_source_split"] = hotpot_source_split
 
     if answerability_split in {"unanswerable", "both"}:
         origin_track = "paired_answerable" if answerability_split == "both" else "external_raw"
@@ -280,6 +283,8 @@ def build_examples_from_tagged_row(
             answerability_split=answerability_split or None,
         )
         if derived is not None:
+            if hotpot_source_split:
+                derived.metadata["hotpot_source_split"] = hotpot_source_split
             out.append(derived)
 
     return out

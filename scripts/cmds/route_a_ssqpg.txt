@@ -1,7 +1,0 @@
-# Route B: train and evaluate on data/dpo/halueval_pairs
-
-accelerate launch -m src.dpo_trainer.train_dpo   --data_dir data/dpo/ssqpg_pairs   --output_dir ckpt/dpo_lora_qwen3_06b_ssqpg   --precompute_ref_log_probs
-python -m src.model_eval.generate_answers --data_path data/dpo/ssqpg_pairs --out_jsonl outputs/model_eval/ssqpg_dpo.jsonl  --lora_ckpt_list_path ckpt/dpo_lora_qwen3_06b_ssqpg --include_base --use_chat_template
-python -m src.model_eval.eval_pairwise_perference --data_dir data/dpo/ssqpg_pairs --out_csv outputs/model_eval/ssqpg_dpo_pairwise_preference_curve.csv --lora_ckpt_list_path ckpt/dpo_lora_qwen3_06b_ssqpg --include_base
-python -m src.model_eval.eval_nli_faithfulness --generated_path outputs/model_eval/ssqpg_dpo.jsonl --split test --out_csv outputs/model_eval/ssqpg_dpo_nli_faithfulness_curve.csv --out_jsonl outputs/model_eval/ssqpg_dpo_nli_faithfulness_samples.jsonl
-python -m src.model_eval.eval_deepeval_hallucination --generated_path outputs/model_eval/ssqpg_dpo.jsonl --metrics_out outputs/model_eval/ssqpg_dpo_deepeval_hallucination_curve.csv --details_out outputs/model_eval/ssqpg_dpo_deepeval_hallucination_samples.jsonl

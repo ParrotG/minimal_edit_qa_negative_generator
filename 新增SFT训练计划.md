@@ -1,194 +1,173 @@
-目标:
+# 新增SFT训练计划
 
-提升模型在“给定 knowledge 回答 question”任务中的：
-1. **Protocol compliance**
-2. **Evidence fidelity**
-3. **Grounded correctness**
-4. **Calibration**
+## 1. 目标
 
-* * *
+本轮计划只围绕 grounded factuality 的 **SFT 阶段** 展开，目标是：
 
-## 总体方法
+- 构造 answerable / unanswerable 混合训练数据
+- 用 teacher 生成协议化 structured completion
+- 训练能够在 infer prompt 下稳定输出 grounded QA 协议的模型
+- 用统一评测流程选择最佳 ckpt，并与多个 base baseline 比较
 
-1. **SFT**：先学习结构化 grounded-QA 协议与拒答行为
-2. **DPO**：在相同协议下学习偏好边界
+## 2. 数据来源与 split
 
-* * *
+HotpotQA distractor subset 作为唯一原始来源：
 
-## 输出协议
+- Hotpot `train`：
+  - 仅用于 `train_sft_raw`
+- Hotpot `validation`：
+  - 仅用于 `validation` / `test`
 
-```json
-{
-  "answerability": "answerable | unanswerable",
-  "evidence": [{"quote": "..."}],
-  "rationale": "...",
-  "answer": "...",
-  "confidence": "high | medium | low"
-}
-```
-
-核心约束：
-
-- `answerable`
-  - `evidence` 至少 1 条
-  - `rationale` 只做最小必要推理
-  - `answer` 保持自然分布
-- `unanswerable`
-  - `evidence = []`
-  - `answer` 必须为允许模板之一
-  - `rationale` 必须指出缺失、歧义或矛盾
-
-* * *
-
-## 数据组织：双标签
-
-在原始 Hotpot 行上先打两个独立标签：
+`data_split` 与 `answerability_split` 保持解耦：
 
 - `data_split`
-  - `validation / test / train_sft_raw / train_dpo_raw`
+  - `train_sft_raw`
+  - `validation`
+  - `test`
 - `answerability_split`
-  - `answerable / unanswerable / both`
+  - `answerable`
+  - `unanswerable`
+  - `both`
 
-默认比例：
+默认 `answerability_split` 比例：
 
-- `answerable_ratio = 0.8`
-- `unanswerable_ratio = 0.1`
-- `both_ratio = 0.1`
+- `answerable = 0.8`
+- `unanswerable = 0.1`
+- `both = 0.1`
 
-其中 `both` 表示同一 raw source 同时产生一条 `answerable` concrete 样本和一条 `unanswerable` concrete 样本。
+## 3. Source 构造
 
-* * *
+### 3.1 answerable
 
-## Source 工作流
+- 由 Hotpot gold supporting facts 构造 knowledge
+- 保留问题、参考答案、supporting facts 信息
+- 之后进入 teacher generate / validate
 
-### Step 1. `source tag`
+### 3.2 unanswerable
 
-从 Hotpot 原始行读取数据，并打上：
+- 基于 answerable scaffold 做 supporting fact 替换
+- 保持 knowledge 长度和表面分布尽量接近
+- 在 source prefilter 中统一做：
+  - infer prompt token 预算过滤
+  - reference answer 的 NLI 判负过滤
 
-- `data_split`
-- `answerability_split`
+### 3.3 source prefilter
 
-两套划分用不同盐值的稳定哈希完成，彼此独立。
+source 阶段统一完成所有输入级过滤：
 
-### Step 2. `source build`
+- 对所有样本做 infer prompt token 长度过滤
+- 对 unanswerable 额外做 NLI prefilter
 
-根据 `answerability_split` 生成混合 concrete 样本：
+这一步不再放在 teacher generate 中。
 
-- `answerability_split = answerable`
-  - 生成 1 条 `answerable`
-- `answerability_split = unanswerable`
-  - 生成 1 条 `unanswerable`
-- `answerability_split = both`
-  - 生成 1 条 `answerable`
-  - 生成 1 条 `unanswerable`
+## 4. Teacher completion
 
-`answerable`：
+teacher 使用统一结构协议：
 
-- 由 HotpotQA gold supporting facts 构造 knowledge
-- 默认最多保留 4 条 supporting facts
-- 必要时为每条 support 加相邻窗口句
+- `answerability`
+- `evidence`
+- `rationale`
+- `answer`
+- `confidence`
 
-`unanswerable`：
+其中：
 
-- 先用相同参数生成 answerable scaffold
-- 再将关键 supporting fact 替换为邻句 / 同文档非-support 句 / 相邻文档句
-- 保持 knowledge block 数量和长度分布尽量接近，而不是简单删除 support
+- answerable 要求最小 sufficient evidence 与最小必要推理
+- unanswerable 要求：
+  - `evidence=[]`
+  - 合法 refusal template
+  - `rationale` 说明信息缺失、歧义或冲突
 
-### Step 3. `source prefilter`
+teacher validate 统一接受 mixed candidates，并在内部按 `answerability_label` 分流：
 
-对混合 concrete 样本统一过滤：
+- answerable：
+  - protocol
+  - evidence substring
+  - correctness
+  - semantic
+  - selection / confidence
+- unanswerable：
+  - protocol
+  - answerability match
+  - completion token budget
+  - 首个 hard-pass 候选
 
-1. 用 `infer_prompt(schema2)` 做 token 预算过滤
-2. 仅对 `unanswerable` 样本做 NLI 判负过滤
+## 5. SFT 数据集
 
-`unanswerable` 判负标准：
+`prepare_sft_dataset` 现按三分区准备：
 
-- premise: `knowledge + question`
-- hypothesis: `The answer is {reference_answer}.`
-- 保留条件：`full_binary = no`
+- `train`
+  - 来自 selected SFT records
+- `validation`
+  - 来自 selected validation SFT records
+  - 必须保留 completion 以计算 validation loss
+- `test`
+  - 可直接来自 source partition 的 `test.jsonl`
+  - 不要求 completion
 
-若原始答案是 `yes / no`，则还会对翻转后的答案重复一次判定；仅当原答案与翻转答案都为 `full_binary = no` 时才保留。该阶段保存聚合分数，后续用于反向映射 `unanswerable` 的 `confidence`。
+准备阶段支持：
 
-这一步是唯一的 source 级 prompt token 过滤入口。`teacher generate` 不再做该过滤。
+- 多来源输入
+- 各 split 最大采样量
+- 各 split 内 answerable / unanswerable 最大采样量
+- prompt / completion token 再过滤
 
-### Step 4. `source partition`
+## 6. 模型评测
 
-按 `data_split` 输出：
+### 6.1 validation
 
-- `validation.jsonl`
-- `test.jsonl`
-- `train_sft_raw.jsonl`
-- `train_dpo_raw.jsonl`
+对 base 与所有保留 ckpt，分别进行：
 
-每个文件内部仍保持 `answerable / unanswerable` 混合。
+- SFT loss
+- structured generation
+- grounded QA 结构评测
 
-* * *
+同时额外构造两类 base baseline：
 
-## Teacher 生成与验证
+- base protocol
+  - teacher few-shot + retry
+- base task
+  - no-think
+  - think
 
-### `teacher generate`
+### 6.2 best ckpt 选择
 
-输入混合样本：
+先加硬约束：
 
-- `answerable` 提供 `reference_answer`
-- `unanswerable` 不提供 `reference_answer`
-- 候选数默认分别为：
-  - `answerable = 3`
-  - `unanswerable = 1`
+- `parse_ok_rate >= 0.95`
+- `protocol_ok_rate_given_parse_ok >= 0.98`
+- `evidence_substring_ok_rate >= 0.95`
 
-teacher prompt 对 `unanswerable` 的要求：
+再按以下顺序选最佳：
 
-- `evidence = []`
-- 使用允许的 refusal template
-- `rationale` 说明缺失、歧义或矛盾
+1. `correctness_reviewed_rate`
+2. `answerability_accuracy`
+3. `semantic_yes_rate`
+4. `mean_loss`
+5. `model_step` 越小越优
 
-### `teacher validate`
+### 6.3 test
 
-接受混合候选，内部按 `answerability_label` 分流：
+在 test 上比较四条轨道：
 
-`answerable`：
+- best ckpt structured
+- base protocol
+- base task no-think
+- base task think
 
-- canonicalization
-- parse
-- protocol
-- evidence
-- correctness
-- optional semantic
-- soft ranking
-- `derived_confidence`
+其中：
 
-`unanswerable`：
+- structured 轨道跑 grounded eval + DeepEval structured
+- task 轨道跑 task-content eval + DeepEval flat
 
-- canonicalization
-- parse
-- protocol
-- answerability 一致性
-- completion token budget
-- 不做 evidence / correctness / semantic
-- 选择 `candidate_id` 最小的首个 hard-pass 候选
+## 7. 结果输出
 
-* * *
+推荐最终使用 `model_eval.run_sft_eval_report` 统一产出：
 
-## SFT 数据构建
+- validation 曲线
+- merged validation curve
+- best ckpt selection.json
+- test 四轨道评测结果
+- final_report.md
 
-输入为混合 selected 样本：
-
-- `answerable`
-  - 必须有 `derived_confidence`
-  - 训练前覆盖 completion 中的 `confidence`
-- `unanswerable`
-  - 用 source-prefilter 保存的 NLI 聚合分数反向映射 `confidence`
-
-输出字段统一使用 `data_split`，不再使用旧字段 `split`。
-
-* * *
-
-## 当前命令顺序
-
-1. `python -m grounded_qa.cli source tag`
-2. `python -m grounded_qa.cli source build`
-3. `python -m grounded_qa.cli source prefilter`
-4. `python -m grounded_qa.cli source partition`
-5. `python -m grounded_qa.cli teacher generate`
-6. `python -m grounded_qa.cli teacher validate`
-7. `python -m grounded_qa.cli build sft-records`
+当前工程已不再包含 DPO 阶段，也不再维护任何 `meqng` / `ssqpg` 路线。

@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable_thinking", action="store_true")
     parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--strip_role_markers", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--eval_track", type=str, default="", help="Optional evaluation track label saved into generated rows.")
+    parser.add_argument("--eval_variant", type=str, default="", help="Optional evaluation variant label saved into generated rows.")
     parser.add_argument("--out_jsonl", type=str, required=True, help="Generated outputs JSONL path.")
     return parser.parse_args()
 
@@ -228,8 +230,25 @@ def _generate_batch_with_retry(
     return out_rows
 
 
-def main() -> None:
-    args = parse_args()
+def _resolve_eval_track(args: argparse.Namespace) -> str:
+    if str(args.eval_track or "").strip():
+        return str(args.eval_track).strip()
+    if args.prompt_mode == "infer":
+        return "sft_structured"
+    return "base_protocol"
+
+
+def _resolve_eval_variant(args: argparse.Namespace) -> str:
+    if str(args.eval_variant or "").strip():
+        return str(args.eval_variant).strip()
+    if args.prompt_mode == "infer":
+        return "checkpoint"
+    return "fewshot_retry"
+
+
+def run_structured_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    """Generate structured outputs for one or more model specs."""
+
     if args.prompt_mode != "teacher_fewshot" and args.fewshot_k != 2:
         # Keep compatibility while avoiding accidental confusion.
         args.fewshot_k = int(args.fewshot_k)
@@ -250,6 +269,8 @@ def main() -> None:
     )
 
     generated_rows: List[Dict[str, Any]] = []
+    eval_track = _resolve_eval_track(args)
+    eval_variant = _resolve_eval_variant(args)
     for spec in model_specs:
         generator = load_generator_from_spec(
             spec=spec,
@@ -281,6 +302,8 @@ def main() -> None:
                         "model_tag": spec.tag,
                         "model_step": int(spec.step),
                         "model_path": spec.display_name,
+                        "eval_track": eval_track,
+                        "eval_variant": eval_variant,
                         **row,
                     }
                 )
@@ -289,6 +312,12 @@ def main() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    return generated_rows
+
+
+def main() -> None:
+    args = parse_args()
+    generated_rows = run_structured_generation(args)
     write_jsonl(args.out_jsonl, generated_rows)
     print(f"Saved structured generations to: {args.out_jsonl}")
 

@@ -1,7 +1,0 @@
-python -m src.model_eval.generate_answers --data_path data/dpo/halueval_pairs_randomcmp --split test --out_jsonl outputs/model_eval/ssqpg_ckpt_on_halueval_randomcmp_test.jsonl --lora_ckpt_list_path ckpt/dpo_lora_qwen3_06b_ssqpg --include_base --use_chat_template
-
-python -m src.model_eval.eval_pairwise_preference --data_dir data/dpo/halueval_pairs_randomcmp --split test --out_csv outputs/model_eval/ssqpg_ckpt_on_halueval_randomcmp_pairwise_preference_curve.csv --lora_ckpt_list_path ckpt/dpo_lora_qwen3_06b_ssqpg --include_base
-
-python -m src.model_eval.eval_nli_faithfulness --generated_path outputs/model_eval/ssqpg_ckpt_on_halueval_randomcmp_test.jsonl --out_csv outputs/model_eval/ssqpg_ckpt_on_halueval_randomcmp_nli_faithfulness_curve.csv --out_jsonl outputs/model_eval/ssqpg_ckpt_on_halueval_randomcmp_nli_faithfulness_samples.jsonl
-
-python -m src.model_eval.eval_deepeval_hallucination --generated_path outputs/model_eval/ssqpg_ckpt_on_halueval_randomcmp_test.jsonl --metrics_out outputs/model_eval/ssqpg_ckpt_on_halueval_randomcmp_deepeval_hallucination_curve.csv --details_out outputs/model_eval/ssqpg_ckpt_on_halueval_randomcmp_deepeval_hallucination_samples.jsonl

@@ -52,14 +52,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--strip_role_markers", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--encourage_refusal", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--eval_track", type=str, default="base_task", help="Evaluation track label saved into generated rows.")
+    parser.add_argument("--eval_variant", type=str, default="", help="Optional evaluation variant label. Defaults to think/no_think from generation mode.")
 
     # Output
     parser.add_argument("--out_jsonl", type=str, required=True, help="Generated answers JSONL output path.")
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def run_answer_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    """Generate non-structured QA answers for one or more model specs."""
 
     items = load_generation_items(
         data_path=args.data_path,
@@ -78,6 +80,7 @@ def main() -> None:
     )
 
     generated_rows: List[Dict[str, Any]] = []
+    eval_variant = str(args.eval_variant or ("think" if bool(args.enable_thinking) else "no_think"))
     for spec in model_specs:
         generator = load_generator_from_spec(
             spec=spec,
@@ -136,6 +139,9 @@ def main() -> None:
                         "reference_answer": sample["reference_answer"],
                         "answerability_label": sample.get("answerability_label") or "",
                         "data_split": sample.get("data_split") or args.split,
+                        "eval_track": str(args.eval_track or "base_task"),
+                        "eval_variant": eval_variant,
+                        "enable_thinking": bool(args.enable_thinking),
                         "answer": answer,
                     }
                 )
@@ -144,6 +150,12 @@ def main() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    return generated_rows
+
+
+def main() -> None:
+    args = parse_args()
+    generated_rows = run_answer_generation(args)
     write_jsonl(args.out_jsonl, generated_rows)
     print(f"Saved generated answers to: {args.out_jsonl}")
 

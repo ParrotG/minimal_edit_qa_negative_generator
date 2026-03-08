@@ -1,279 +1,176 @@
-# SFT 实施与工程计划
+# SFT实施与工程计划
 
-## 1. 当前设计结论
+## 1. 工程范围
 
-- 工作流按 `source -> teacher -> build` 三大阶段组织。
-- `data_split` 与 `answerability_split` 已解耦：
-  - `data_split`: `validation / test / train_sft_raw / train_dpo_raw`
-  - `answerability_split`: `answerable / unanswerable / both`
-- `source` 阶段固定为四步：
-  - `tag`
-  - `build`
-  - `prefilter`
-  - `partition`
-- `teacher` 阶段固定为两步：
-  - `generate`
-  - `validate`
-- `teacher validate` 接受混合样本，内部按 `answerability_label` 分流：
-  - `answerable` 走完整检查链
-  - `unanswerable` 走简化拒答检查链
+本工程现仅保留 SFT 阶段相关能力：
 
-## 2. 双标签数据组织
+- grounded QA source 构造
+- teacher structured completion 生成与验证
+- SFT 数据集准备与训练
+- base / ckpt 的 validation / test 评测与报告
 
-### 2.1 原始 Hotpot 行
+以下内容已不再属于当前工程范围：
 
-在任何知识构造之前，先对原始 Hotpot 样本打两个独立标签：
+- DPO 数据构造
+- DPO 训练与 pairwise preference 评测
+- `meqng`
+- `ssqpg`
+
+## 2. 当前数据模型
+
+### 2.1 Raw tagging
+
+原始 Hotpot 行在 `source tag` 后同时带两类标签：
+
+- `data_split`
+  - `train_sft_raw`
+  - `validation`
+  - `test`
+- `answerability_split`
+  - `answerable`
+  - `unanswerable`
+  - `both`
+
+另保留：
+
+- `hotpot_source_split`
+  - `train`
+  - `validation`
+
+规则固定为：
+
+- Hotpot `train` -> `train_sft_raw`
+- Hotpot `validation` -> 再切成 `validation/test`
+
+### 2.2 Concrete example
+
+`QaExample` 顶层使用：
 
 - `data_split`
 - `answerability_split`
-
-两套标签使用不同盐值的稳定哈希函数分配，保证统计上独立。
-
-### 2.2 默认比例
-
-- `data_split`
-  - `validation_ratio = 0.05`
-  - `test_ratio = 0.05`
-  - `train_sft_ratio = 0.45`
-  - `train_dpo_ratio = 0.45`
-- `answerability_split`
-  - `answerable_ratio = 0.8`
-  - `unanswerable_ratio = 0.1`
-  - `both_ratio = 0.1`
-
-`both` 表示同一 raw source 同时生成一条 `answerable` concrete 样本和一条 `unanswerable` concrete 样本。
-
-## 3. Concrete 样本结构
-
-统一使用 `QaExample`：
-
-- `id`
-- `source_id`
-- `variant_id`
-- `data_split`
-- `answerability_split`
-- `question`
-- `knowledge`
-- `reference_answer`
 - `answerability_label`
-- `difficulty`
-- `supporting_sentences`
-- `context_documents`
-- `metadata`
 
-说明：
+其中：
 
-- `answerability_split` 是原始样本的构造轨道标签。
-- `answerability_label` 是当前 concrete 样本自身的标签。
-- 旧顶层字段 `split` 已删除，不再保留兼容别名。
+- `answerability_split` 表示原始样本走哪条构造轨
+- `answerability_label` 表示当前 concrete 样本本身是 `answerable` 还是 `unanswerable`
 
-## 4. Source 阶段
+## 3. 当前主流程
 
-### 4.1 `source tag`
+### 3.1 Source
 
-输入：Hotpot 原始样本。  
-输出：`tagged_hotpot_rows.jsonl`
+`source tag -> source build -> source prefilter -> source partition`
 
-新增字段：
+- `source tag` 同时读取 Hotpot distractor 的 `train` 和 `validation`
+- `source build` 输出 mixed answerable / unanswerable concrete 样本
+- `source prefilter` 统一做 infer prompt token 过滤，并对 unanswerable 做 NLI 判负过滤
+- `source partition` 只按 `data_split` 切出：
+  - `train_sft_raw.jsonl`
+  - `validation.jsonl`
+  - `test.jsonl`
 
-- `data_split`
-- `answerability_split`
+### 3.2 Teacher
 
-### 4.2 `source build`
+`teacher generate -> teacher validate -> build sft-records`
 
-输入：`tagged_hotpot_rows.jsonl`  
-输出：`prepared_examples.jsonl`
+- `teacher generate` 接受 mixed source
+- `teacher validate` 内部按 `answerability_label` 分流 answerable / unanswerable 检查
+- answerable 使用 derived confidence
+- unanswerable 保留其自身置信度路径
 
-构造规则：
+### 3.3 SFT 与评测
 
-- `answerability_split = answerable`
-  - 只产一条 `answerable`
-- `answerability_split = unanswerable`
-  - 只产一条 `unanswerable`
-- `answerability_split = both`
-  - 同时产一条 `answerable` 与一条 `unanswerable`
+- `prepare_sft_dataset` 接收 train / validation / test 三个来源
+- validation 需要 completion 以计算 loss
+- test 不需要 completion，可直接来自 source partition 的产物
+- `run_sft_eval_report` 在 validation 上做：
+  - SFT loss
+  - structured generation
+  - grounded evaluation
+  - 最佳 ckpt 选择
+- 然后在 test 上比较：
+  - best ckpt structured
+  - base protocol
+  - base task no-think
+  - base task think
 
-### 4.3 `source prefilter`
+## 4. 包结构
 
-输入：`prepared_examples.jsonl`  
-输出：`prefiltered_examples.jsonl`
+当前保留的主要包：
 
-过滤顺序：
+- `grounded_qa`
+- `sft_trainer`
+- `model_eval`
+- `qa_protocol`
+- `qa_checks`
+- `qa_judge`
+- `qa_data`
+- `llm_textgen`
+- `dataio`
 
-1. 所有样本统一做 `infer_prompt(schema2)` token 长度过滤
-2. 仅对 `unanswerable` 样本做 `full_binary=no` NLI 判负过滤
+删除的包：
 
-这一步是唯一的 source 级 prompt 预算过滤入口。`teacher generate` 不再承担该职责。
+- `dpo_trainer`
+- `meqng`
+- `ssqpg`
 
-若原始答案为 `yes / no`，则会对翻转后的答案再做一次 NLI 判定；只有原答案与翻转答案都为 `full_binary = no` 才保留。该阶段还会保存聚合语义分数，供后续反向映射 `unanswerable` 的 `confidence`。
+## 5. 当前评测约定
 
-### 4.4 `source partition`
+### 5.1 Structured grounded eval
 
-输入：`prefiltered_examples.jsonl`  
-输出目录：
+`eval_grounded_qa.py` 当前输出至少包含：
 
-- `validation.jsonl`
-- `test.jsonl`
-- `train_sft_raw.jsonl`
-- `train_dpo_raw.jsonl`
+- `parse_ok_rate`
+- `protocol_ok_rate_given_parse_ok`
+- `answerability_accuracy`
+- `evidence_substring_ok_rate`
+- `correctness_strict_rate`
+- `correctness_reviewed_rate`
+- `semantic_yes_rate`
+- `semantic_margin_mean`
+- `confidence_reliability_auroc`
 
-每个文件内部仍然是混合的 `answerable / unanswerable` 样本。
+### 5.2 DeepEval
 
-## 5. Teacher 阶段
+`eval_deepeval_hallucination.py` 支持两种输入模式：
 
-### 5.1 `teacher generate`
+- `flat`
+- `structured`
 
-输入：混合 concrete 样本。  
-输出：`teacher_candidates.jsonl`
+`structured` 模式会从结构输出中提取：
 
-规则：
+`rationale + "\nTherefore the answer is " + answer`
 
-- `answerable` 样本向 teacher prompt 提供 `reference_answer`
-- `unanswerable` 样本不提供 `reference_answer`
-- 不再进行 source 级 token 预算过滤
-- 候选数分开配置：
-  - `answerable_num_candidates_per_example = 3`
-  - `unanswerable_num_candidates_per_example = 1`
+### 5.3 合并曲线
 
-### 5.2 `teacher validate`
+`merge_eval_curves.py` 纵向合并以下 validation 曲线：
 
-输入：混合候选。  
-输出：
+- `sft_val_structured_curve.csv`
+- `base_protocol_curve.csv`
+- `base_task_think_curve.csv`
+- `base_task_nothink_curve.csv`
 
-- `validated_candidates.jsonl`
-- `selected_candidates.jsonl`
+并统一保留：
 
-内部逻辑：
+- `model_tag`
+- `model_step`
+- `model_path`
+- `eval_track`
+- `eval_variant`
 
-1. 读取混合候选
-2. 按 `answerability_label` 分流
-3. `answerable` 走完整 validate
-4. `unanswerable` 走简化 validate
-5. 合并 validated 与 selected 输出
-
-#### `answerable` validate
-
-- canonicalization
-- parse
-- protocol
-- evidence
-- correctness
-- optional semantic
-- soft ranking
-- `derived_confidence`
-
-#### `unanswerable` validate
-
-- canonicalization
-- parse
-- protocol
-- answerability 一致性
-- completion token budget
-- 不做 evidence / correctness / semantic
-- 选 `candidate_id` 最小的首个 hard-pass 候选
-
-## 6. SFT 打包
-
-`build sft-records` 接受混合 selected 样本：
-
-- `answerable`
-  - 必须存在 `derived_confidence`
-  - completion 中的 `confidence` 用 `derived_confidence` 覆盖
-- `unanswerable`
-  - 用 source-prefilter 保存的语义分数反向映射 `confidence`
-  - 原答案越不被支持，`confidence` 越高
-
-SFT record 顶层使用：
-
-- `data_split`
-
-不再使用旧字段 `split`。
-
-## 7. 代码结构
-
-```text
-src/
-  grounded_qa/
-    cli.py
-    config.py
-    workflow.py
-
-  qa_protocol/
-    answer_style.py
-    normalize.py
-    parsing.py
-    prompting.py
-    refusal.py
-    schema.py
-    spec.py
-    token_budget.py
-
-  qa_data/
-    construct.py
-    export.py
-    hotpot.py
-    partition.py
-    records.py
-    tagging.py
-    unanswerable.py
-
-  qa_checks/
-    correctness.py
-    evidence.py
-    protocol.py
-    report.py
-    selection.py
-    semantics.py
-    source_prefilter.py
-    unanswerable_prefilter.py
-    unanswerable_selection.py
-
-  qa_judge/
-    structured.py
-
-  sft_trainer/
-    formatting.py
-    prepare_sft_dataset.py
-    train_sft.py
-
-  model_eval/
-    generate_structured_answers.py
-    eval_grounded_qa.py
-```
-
-## 8. 当前主命令集
-
-```bash
-python -m grounded_qa.cli source tag
-python -m grounded_qa.cli source build
-python -m grounded_qa.cli source prefilter
-python -m grounded_qa.cli source partition
-
-python -m grounded_qa.cli teacher generate
-python -m grounded_qa.cli teacher validate
-
-python -m grounded_qa.cli build sft-records
-```
-
-## 9. 当前全流程工作命令
-
-运行前建议：
-
-```bash
-export PYTHONPATH=src
-```
+## 6. 当前全流程工作命令
 
 ```bash
 python -m grounded_qa.cli source tag \
   --out data/grounded_qa/tagged_hotpot_rows.jsonl \
-  --split train \
   --dataset-name hotpotqa/hotpot_qa \
-  --max-samples -1 \
+  --train-split train \
+  --validation-split validation \
+  --max-train-samples -1 \
+  --max-validation-samples -1 \
   --seed 42 \
-  --validation-ratio 0.05 \
-  --test-ratio 0.05 \
-  --train-sft-ratio 0.45 \
-  --train-dpo-ratio 0.45 \
+  --validation-ratio 0.5 \
+  --test-ratio 0.5 \
   --answerable-ratio 0.8 \
   --unanswerable-ratio 0.1 \
   --both-ratio 0.1 \
@@ -282,11 +179,23 @@ python -m grounded_qa.cli source tag \
 python -m grounded_qa.cli source build \
   --in-path data/grounded_qa/tagged_hotpot_rows.jsonl \
   --out data/grounded_qa/prepared_examples.jsonl \
+  --window-size 1 \
+  --max-supporting-facts 4 \
+  --replace-supporting-facts-min 1 \
+  --replace-supporting-facts-max 1 \
+  --same-doc-candidate-radius 1 \
+  --allow-same-doc-non-adjacent \
+  --adjacent-doc-sentence-limit 1 \
+  --include-title-prefix \
+  --seed 42 \
   --metrics-out outputs/grounded_qa/build_metrics.json
 
 python -m grounded_qa.cli source prefilter \
   --in-path data/grounded_qa/prepared_examples.jsonl \
   --out data/grounded_qa/prefiltered_examples.jsonl \
+  --tokenizer-name Qwen/Qwen3-0.6B \
+  --max-prompt-tokens 512 \
+  --enable-unanswerable-nli \
   --metrics-out outputs/grounded_qa/prefilter_metrics.json
 
 python -m grounded_qa.cli source partition \
@@ -299,18 +208,59 @@ python -m grounded_qa.cli teacher generate \
   --out data/grounded_qa/teacher_candidates_train_sft.jsonl \
   --answerable-num-candidates-per-example 3 \
   --unanswerable-num-candidates-per-example 1 \
-  --metrics-out outputs/grounded_qa/teacher-generate-train-sft-metrics.json
+  --api-model-name qwen3.5-plus \
+  --api-base-url https://dashscope-intl.aliyuncs.com/compatible-mode/v1 \
+  --api-key-env DASHSCOPE_API_KEY \
+  --max-new-tokens 512 \
+  --temperature 0.2 \
+  --top-p 0.95 \
+  --metrics-out outputs/grounded_qa/teacher_generate_metrics.json
 
 python -m grounded_qa.cli teacher validate \
   --in-path data/grounded_qa/teacher_candidates_train_sft.jsonl \
   --out data/grounded_qa/validated_train_sft.jsonl \
   --selected-out data/grounded_qa/selected_train_sft.jsonl \
-  --metrics-out outputs/grounded_qa/teacher-validate-train-sft-metrics.json
+  --enable-semantics \
+  --semantic-drop-by-nli \
+  --semantic-decision-source full_binary \
+  --tokenizer-name Qwen/Qwen3-0.6B \
+  --max-completion-tokens 512 \
+  --metrics-out outputs/grounded_qa/teacher_validate_metrics.json
 
 python -m grounded_qa.cli build sft-records \
   --in-path data/grounded_qa/selected_train_sft.jsonl \
   --out data/grounded_qa/sft_records_train_sft.jsonl \
   --prompt-style infer_v1 \
   --keep-only-overall-ok \
-  --metrics-out outputs/grounded_qa/sft-records-train-sft-metrics.json
+  --metrics-out outputs/grounded_qa/sft_records_metrics.json
+
+python -m sft_trainer.prepare_sft_dataset \
+  --train-paths data/grounded_qa/sft_records_train_sft.jsonl \
+  --validation-paths data/grounded_qa/sft_records_validation.jsonl \
+  --test-paths data/grounded_qa/partitioned/test.jsonl \
+  --output-dir data/sft_dataset \
+  --overwrite-output \
+  --max-prompt-tokens 512 \
+  --max-completion-tokens 512 \
+  --metrics-out outputs/sft/prepare_dataset_metrics.json
+
+python -m sft_trainer.train_sft \
+  --data-dir data/sft_dataset \
+  --base-model Qwen/Qwen3-0.6B \
+  --output-dir ckpt/sft_lora_qwen3_06b_groundedqa
+
+python -m model_eval.run_sft_eval_report \
+  --validation-data-path data/sft_dataset \
+  --test-data-path data/sft_dataset \
+  --validation-split validation \
+  --test-split test \
+  --base-model Qwen/Qwen3-0.6B \
+  --lora-ckpt-list-path ckpt/sft_lora_qwen3_06b_groundedqa \
+  --out-dir outputs/model_eval/final_report \
+  --validation-max-samples 1000 \
+  --test-max-samples 1000 \
+  --structured-max-new-tokens 512 \
+  --base-protocol-max-new-tokens 512 \
+  --base-task-max-new-tokens 512 \
+  --base-task-think-max-new-tokens 1024
 ```

@@ -17,7 +17,13 @@ from qa_judge.config import JudgeConfig, NLIConfig
 from qa_judge.structured import StructuredAnswerJudge
 from qa_protocol import parse_structured_output, validate_structured_payload
 
-from .common import extract_knowledge_question_from_infer_prompt, load_dataset_split, write_csv
+from .common import (
+    extract_knowledge_question_from_infer_prompt,
+    infer_eval_track,
+    infer_eval_variant,
+    load_dataset_split,
+    write_csv,
+)
 from .correctness_transformer_matcher import (
     AnswerEquivalenceTransformerMatcher,
     TransformerMatcherConfig,
@@ -65,11 +71,13 @@ def _safe_mean(values: Sequence[float]) -> float:
     return float(sum(values) / len(values))
 
 
-def _extract_model_key(row: Dict[str, Any]) -> Tuple[str, int, str]:
+def _extract_model_key(row: Dict[str, Any]) -> Tuple[str, int, str, str, str]:
     return (
         str(row.get("model_tag") or row.get("tag") or "model"),
         int(row.get("model_step") or row.get("step") or 0),
         str(row.get("model_path") or row.get("model_name") or "model"),
+        infer_eval_track(row),
+        infer_eval_variant(row),
     )
 
 
@@ -185,6 +193,22 @@ def _spearman(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
     if len(xs) != len(ys) or len(xs) < 2:
         return None
     return _pearson(_rank_values(xs), _rank_values(ys))
+
+
+def _binary_auroc(scores: Sequence[float], labels: Sequence[int]) -> Optional[float]:
+    """Compute AUROC for binary labels without external dependencies."""
+
+    if len(scores) != len(labels) or len(scores) < 2:
+        return None
+    num_pos = sum(1 for label in labels if int(label) == 1)
+    num_neg = sum(1 for label in labels if int(label) == 0)
+    if num_pos == 0 or num_neg == 0:
+        return None
+
+    ranked = _rank_values(scores)
+    pos_rank_sum = sum(rank for rank, label in zip(ranked, labels) if int(label) == 1)
+    u_stat = pos_rank_sum - (num_pos * (num_pos + 1) / 2.0)
+    return float(u_stat / float(num_pos * num_neg))
 
 
 def _empty_semantic_report() -> SemanticCheckReport:
@@ -365,6 +389,8 @@ def _evaluate_one_model(
     confidence_pairs_semantic_yes_y: List[float] = []
     confidence_pairs_semantic_margin_x: List[float] = []
     confidence_pairs_semantic_margin_y: List[float] = []
+    confidence_reliability_scores: List[float] = []
+    confidence_reliability_labels: List[int] = []
 
     confidence_bucket: Dict[str, Dict[str, List[float]]] = {
         "high": {"answerability": [], "correctness": [], "correctness_reviewed": [], "semantic_yes": [], "semantic_margin": []},
@@ -437,6 +463,13 @@ def _evaluate_one_model(
             if confidence_label in confidence_bucket:
                 confidence_bucket[confidence_label]["answerability"].append(1.0 if answerability_match else 0.0)
 
+        if confidence_rank is not None and answerability_match is not None:
+            success_label = 0
+            if bool(answerability_match):
+                success_label = 1 if (not is_pred_answerable or bool(reviewed_ok)) else 0
+            confidence_reliability_scores.append(float(confidence_rank))
+            confidence_reliability_labels.append(int(success_label))
+
         if parse_ok and is_pred_answerable and confidence_rank is not None:
             if correctness_report is not None:
                 correctness_value = 1.0 if correctness_report.ok else 0.0
@@ -468,6 +501,8 @@ def _evaluate_one_model(
                 "model_tag": row.get("model_tag"),
                 "model_step": row.get("model_step"),
                 "model_path": row.get("model_path"),
+                "eval_track": infer_eval_track(row),
+                "eval_variant": infer_eval_variant(row),
                 "sample_id": row.get("sample_id"),
                 "source_id": row.get("source_id"),
                 "id": row.get("id"),
@@ -534,6 +569,9 @@ def _evaluate_one_model(
         "avg_attempt_count": float(attempt_total / num_rows) if num_rows > 0 else float("nan"),
         "success_on_first_attempt_rate": _safe_rate(success_on_first_attempt, num_rows),
         "supporting_fact_check_enabled": False,
+        "confidence_reliability_auroc": _binary_auroc(confidence_reliability_scores, confidence_reliability_labels),
+        "confidence_reliability_num_rows": len(confidence_reliability_scores),
+        "confidence_reliability_excluded_rows": num_rows - len(confidence_reliability_scores),
     }
 
     confidence_metrics = {
@@ -575,12 +613,18 @@ def _evaluate_one_model(
             }
             for label, values in confidence_bucket.items()
         },
+        "reliability": {
+            "auroc": _binary_auroc(confidence_reliability_scores, confidence_reliability_labels),
+            "eligible_count": len(confidence_reliability_scores),
+            "excluded_count": num_rows - len(confidence_reliability_scores),
+        },
     }
     return metrics, details, confidence_metrics
 
 
-def main() -> None:
-    args = parse_args()
+def run_grounded_qa_evaluation(args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Run grounded-QA evaluation and return summary, details, and confidence rows."""
+
     rows = _load_rows(
         generated_path=args.generated_path,
         split=args.split,
@@ -590,7 +634,7 @@ def main() -> None:
     if not rows:
         raise RuntimeError("No rows found for grounded-QA evaluation.")
 
-    grouped: Dict[Tuple[str, int, str], List[Dict[str, Any]]] = {}
+    grouped: Dict[Tuple[str, int, str, str, str], List[Dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(_extract_model_key(row), []).append(row)
 
@@ -602,7 +646,7 @@ def main() -> None:
     details_rows: List[Dict[str, Any]] = []
     confidence_rows: List[Dict[str, Any]] = []
 
-    for model_key, model_rows in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])):
+    for model_key, model_rows in sorted(grouped.items(), key=lambda item: (item[0][3], item[0][1], item[0][4], item[0][0], item[0][2])):
         metrics, details, confidence_metrics = _evaluate_one_model(
             rows=model_rows,
             structured_judge=structured_judge,
@@ -616,6 +660,8 @@ def main() -> None:
                 "model_tag": model_key[0],
                 "model_step": model_key[1],
                 "model_path": model_key[2],
+                "eval_track": model_key[3],
+                "eval_variant": model_key[4],
                 **metrics,
             }
         )
@@ -625,9 +671,18 @@ def main() -> None:
                 "model_tag": model_key[0],
                 "model_step": model_key[1],
                 "model_path": model_key[2],
+                "eval_track": model_key[3],
+                "eval_variant": model_key[4],
                 **confidence_metrics,
             }
         )
+
+    return summary_rows, details_rows, confidence_rows
+
+
+def main() -> None:
+    args = parse_args()
+    summary_rows, details_rows, confidence_rows = run_grounded_qa_evaluation(args)
 
     write_csv(summary_rows, args.metrics_out)
     print(f"Saved metrics to: {args.metrics_out}")

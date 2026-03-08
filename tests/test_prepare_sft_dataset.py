@@ -54,7 +54,10 @@ class PrepareSftDatasetTests(unittest.TestCase):
                     {
                         "id": "tr-u-drop",
                         "source_id": "s3",
-                        "prompt": "this prompt is intentionally too long for filter",
+                        "prompt": (
+                            "this prompt is intentionally too long for the configured token filter budget "
+                            "in this unit test and keeps adding extra filler tokens so it exceeds the limit"
+                        ),
                         "completion": '{"answer":"C"}',
                         "answerability_label": "unanswerable",
                     },
@@ -85,6 +88,7 @@ class PrepareSftDatasetTests(unittest.TestCase):
                     {
                         "id": "te-1",
                         "source_id": "s6",
+                        "prompt": "test prompt",
                         "question": "Who founded Acme?",
                         "knowledge": "Acme was founded by Alice.",
                         "answerability_label": "answerable",
@@ -114,7 +118,7 @@ class PrepareSftDatasetTests(unittest.TestCase):
                 "--metrics_out",
                 str(metrics_out),
                 "--max_prompt_tokens",
-                "4",
+                "16",
                 "--max_completion_tokens",
                 "20",
                 "--max_train_answerable_samples",

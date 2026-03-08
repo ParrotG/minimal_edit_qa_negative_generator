@@ -66,16 +66,20 @@ def tag_source_rows(
     rows = list(iter_tagged_hotpot_rows(source_cfg, data_split_cfg, answerability_split_cfg))
     data_split_counts: Dict[str, int] = {}
     answerability_split_counts: Dict[str, int] = {}
+    hotpot_source_split_counts: Dict[str, int] = {}
     for row in rows:
         data_split = str(row.get("data_split") or "").strip()
         answerability_split = str(row.get("answerability_split") or "").strip()
+        hotpot_source_split = str(row.get("hotpot_source_split") or "").strip()
         data_split_counts[data_split] = data_split_counts.get(data_split, 0) + 1
         answerability_split_counts[answerability_split] = answerability_split_counts.get(answerability_split, 0) + 1
+        hotpot_source_split_counts[hotpot_source_split] = hotpot_source_split_counts.get(hotpot_source_split, 0) + 1
 
     metrics = {
         "num_rows": len(rows),
         "data_split_counts": data_split_counts,
         "answerability_split_counts": answerability_split_counts,
+        "hotpot_source_split_counts": hotpot_source_split_counts,
     }
     write_jsonl(out_path, rows)
     if metrics_out:

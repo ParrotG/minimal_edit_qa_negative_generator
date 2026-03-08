@@ -14,6 +14,7 @@ try:
     from model_eval.answer_extraction import parse_answer_extraction_output
     from model_eval.common import (
         extract_knowledge_question_from_infer_prompt,
+        extract_structured_output_text,
         load_dataset_split,
         load_structured_generation_items,
         normalize_generated_row,
@@ -22,22 +23,27 @@ try:
         AnswerEquivalenceTransformerMatcher,
         TransformerMatcherConfig,
     )
+    from model_eval.eval_grounded_qa import _binary_auroc
     from model_eval.generate_structured_answers import _build_prompt, _generate_batch_with_retry
     from model_eval.merge_eval_curves import _project_rows
+    from model_eval.run_sft_eval_report import _select_best_checkpoint
     from llm_textgen.generator import UnifiedTextGenerator
 except ModuleNotFoundError:  # pragma: no cover
     check_answer_correctness = None
     CorrectnessConfig = None
     parse_answer_extraction_output = None
     extract_knowledge_question_from_infer_prompt = None
+    extract_structured_output_text = None
     load_dataset_split = None
     load_structured_generation_items = None
     normalize_generated_row = None
     AnswerEquivalenceTransformerMatcher = None
     TransformerMatcherConfig = None
+    _binary_auroc = None
     _build_prompt = None
     _generate_batch_with_retry = None
     _project_rows = None
+    _select_best_checkpoint = None
     UnifiedTextGenerator = None
 
 
@@ -57,11 +63,14 @@ def _write_jsonl(path: Path, rows) -> None:
             normalize_generated_row,
             check_answer_correctness,
             parse_answer_extraction_output,
+            extract_structured_output_text,
             AnswerEquivalenceTransformerMatcher,
             TransformerMatcherConfig,
+            _binary_auroc,
             _build_prompt,
             _generate_batch_with_retry,
             _project_rows,
+            _select_best_checkpoint,
             UnifiedTextGenerator,
         )
     ),
@@ -97,6 +106,22 @@ class ModelEvalRefactorTests(unittest.TestCase):
         normalized = normalize_generated_row(row, idx=0, answer_source="rationale_plus_answer")
         self.assertIsNotNone(normalized)
         self.assertIn("Therefore the answer is Alice", normalized["answer"])
+        self.assertEqual(normalized["eval_track"], "sft_structured")
+        self.assertEqual(normalized["eval_variant"], "checkpoint")
+
+    def test_extract_structured_output_text_parses_raw_output(self) -> None:
+        row = {
+            "raw_output": (
+                '{"answerability":"answerable","evidence":[{"quote":"Acme was founded by Alice."}],'
+                '"rationale":"The quote identifies the founder.","answer":"Alice","confidence":"high"}'
+            )
+        }
+        text, meta = extract_structured_output_text(row)
+        self.assertIn("Therefore the answer is Alice", text)
+        self.assertTrue(meta["structured_parse_ok"])
+        self.assertTrue(meta["structured_answer_present"])
+        self.assertTrue(meta["structured_rationale_present"])
+        self.assertFalse(meta["structured_extract_failed"])
 
     def test_load_dataset_split_handles_jsonl_with_mixed_nested_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -252,10 +277,11 @@ class ModelEvalRefactorTests(unittest.TestCase):
         self.assertEqual(out[0]["attempt_count"], 2)
 
     def test_project_rows_uses_sft_schema_and_fills_nan(self) -> None:
-        schema = ["model_tag", "model_step", "model_path", "num_rows", "parse_ok_rate"]
-        rows = [{"model_tag": "base", "model_step": "0", "model_path": "m", "num_rows": "10"}]
+        schema = ["model_tag", "model_step", "model_path", "eval_track", "eval_variant", "num_rows", "parse_ok_rate"]
+        rows = [{"model_tag": "base", "model_step": "0", "model_path": "m", "eval_track": "base_task", "eval_variant": "no_think", "num_rows": "10"}]
         projected = _project_rows(rows, schema)
         self.assertEqual(projected[0]["model_tag"], "base")
+        self.assertEqual(projected[0]["eval_track"], "base_task")
         self.assertEqual(projected[0]["num_rows"], "10")
         self.assertEqual(projected[0]["parse_ok_rate"], "nan")
 
@@ -267,6 +293,68 @@ class ModelEvalRefactorTests(unittest.TestCase):
         )
         self.assertIn("If the provided knowledge is insufficient", prompt)
         self.assertTrue(prompt.endswith("Answer: "))
+
+    def test_binary_auroc_uses_confidence_order(self) -> None:
+        score = _binary_auroc([1.0, 2.0, 3.0, 1.0], [0, 0, 1, 1])
+        self.assertIsNotNone(score)
+        self.assertGreaterEqual(float(score), 0.5)
+
+    def test_select_best_checkpoint_prefers_hard_constraint_then_main_targets(self) -> None:
+        selection = _select_best_checkpoint(
+            eval_rows=[
+                {
+                    "model_tag": "checkpoint-100",
+                    "model_step": 100,
+                    "model_path": "ckpt-100",
+                    "eval_track": "sft_structured",
+                    "eval_variant": "checkpoint",
+                    "parse_ok_rate": 0.94,
+                    "protocol_ok_rate_given_parse_ok": 0.99,
+                    "evidence_substring_ok_rate": 0.99,
+                    "correctness_reviewed_rate": 0.95,
+                    "answerability_accuracy": 0.95,
+                    "semantic_yes_rate": 0.90,
+                },
+                {
+                    "model_tag": "checkpoint-200",
+                    "model_step": 200,
+                    "model_path": "ckpt-200",
+                    "eval_track": "sft_structured",
+                    "eval_variant": "checkpoint",
+                    "parse_ok_rate": 0.97,
+                    "protocol_ok_rate_given_parse_ok": 0.99,
+                    "evidence_substring_ok_rate": 0.97,
+                    "correctness_reviewed_rate": 0.90,
+                    "answerability_accuracy": 0.96,
+                    "semantic_yes_rate": 0.89,
+                },
+            ],
+            loss_rows=[
+                {
+                    "model_tag": "checkpoint-100",
+                    "model_step": 100,
+                    "model_path": "ckpt-100",
+                    "eval_track": "sft_structured",
+                    "eval_variant": "checkpoint",
+                    "mean_loss": 1.1,
+                },
+                {
+                    "model_tag": "checkpoint-200",
+                    "model_step": 200,
+                    "model_path": "ckpt-200",
+                    "eval_track": "sft_structured",
+                    "eval_variant": "checkpoint",
+                    "mean_loss": 1.2,
+                },
+            ],
+            args=Namespace(
+                parse_ok_threshold=0.95,
+                protocol_ok_threshold=0.98,
+                evidence_ok_threshold=0.95,
+            ),
+        )
+        self.assertTrue(selection["constraint_satisfied"])
+        self.assertEqual(selection["selected_model_path"], "ckpt-200")
 
 
 if __name__ == "__main__":

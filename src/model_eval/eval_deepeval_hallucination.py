@@ -10,7 +10,7 @@ from deepeval.test_case import LLMTestCase
 from deepeval.models import GPTModel
 
 from dataio import write_jsonl
-from .common import load_generated_rows, write_csv
+from .common import extract_structured_output_text, load_dataset_split, load_generated_rows, write_csv
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,11 +22,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_samples", type=int, default=-1, help="Maximum evaluated rows. -1 means all.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--input_mode",
+        type=str,
+        default="flat",
+        choices=["flat", "structured"],
+        help="Whether generated_path contains plain answers or structured generations.",
+    )
+    parser.add_argument(
         "--answer_source",
         type=str,
         default="answer",
         choices=["answer", "rationale_plus_answer"],
-        help="Select the evaluated text source.",
+        help="Select the evaluated text source for flat mode.",
     )
 
     # DeepEval Hallucination metric
@@ -41,16 +48,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def run_deepeval_hallucination(args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Run DeepEval hallucination scoring and return summary and detail rows."""
 
-    rows = load_generated_rows(
-        generated_path=args.generated_path,
-        split=args.split,
-        max_samples=args.max_samples,
-        seed=args.seed,
-        answer_source=args.answer_source,
-    )
+    if args.input_mode == "structured":
+        ds = load_dataset_split(data_path=args.generated_path, split=args.split).shuffle(seed=args.seed)
+        rows: List[Dict[str, Any]] = []
+        for idx, raw_row in enumerate(ds):
+            row = dict(raw_row)
+            answer_text, structured_meta = extract_structured_output_text(row)
+            question = str(row.get("question") or "").strip()
+            knowledge = str(row.get("knowledge") or "").strip()
+            if not answer_text or not question or not knowledge:
+                continue
+            rows.append(
+                {
+                    "model_tag": str(row.get("model_tag") or row.get("tag") or "model"),
+                    "model_step": int(row.get("model_step") or row.get("step") or 0),
+                    "model_path": str(row.get("model_path") or row.get("model_name") or "model"),
+                    "eval_track": str(row.get("eval_track") or ""),
+                    "eval_variant": str(row.get("eval_variant") or ""),
+                    "sample_id": int(row.get("sample_id") or idx),
+                    "source_id": str(row.get("source_id") or row.get("id") or idx),
+                    "question": question,
+                    "knowledge": knowledge,
+                    "answer": answer_text,
+                    **structured_meta,
+                }
+            )
+            if args.max_samples > 0 and len(rows) >= args.max_samples:
+                break
+    else:
+        rows = load_generated_rows(
+            generated_path=args.generated_path,
+            split=args.split,
+            max_samples=args.max_samples,
+            seed=args.seed,
+            answer_source=args.answer_source,
+        )
     if not rows:
         raise RuntimeError("No valid generated rows found for DeepEval hallucination evaluation.")
 
@@ -65,8 +100,14 @@ def main() -> None:
                     "model_tag": row["model_tag"],
                     "model_step": row["model_step"],
                     "model_path": row["model_path"],
+                    "eval_track": row.get("eval_track"),
+                    "eval_variant": row.get("eval_variant"),
                     "sample_id": row["sample_id"],
                     "source_id": row["source_id"],
+                    "structured_parse_ok": row.get("structured_parse_ok"),
+                    "structured_answer_present": row.get("structured_answer_present"),
+                    "structured_rationale_present": row.get("structured_rationale_present"),
+                    "structured_extract_failed": row.get("structured_extract_failed"),
                 },
             )
         )
@@ -108,8 +149,14 @@ def main() -> None:
                 "model_tag": meta.get("model_tag"),
                 "model_step": meta.get("model_step"),
                 "model_path": meta.get("model_path"),
+                "eval_track": meta.get("eval_track"),
+                "eval_variant": meta.get("eval_variant"),
                 "sample_id": meta.get("sample_id"),
                 "source_id": meta.get("source_id"),
+                "structured_parse_ok": meta.get("structured_parse_ok"),
+                "structured_answer_present": meta.get("structured_answer_present"),
+                "structured_rationale_present": meta.get("structured_rationale_present"),
+                "structured_extract_failed": meta.get("structured_extract_failed"),
                 "input": tr.input,
                 "actual_output": tr.actual_output,
                 "context": tr.context,
@@ -124,13 +171,19 @@ def main() -> None:
             }
         )
 
-    grouped: Dict[Tuple[str, int, str], List[Dict[str, Any]]] = {}
+    grouped: Dict[Tuple[str, int, str, str, str], List[Dict[str, Any]]] = {}
     for row in details:
-        key = (str(row["model_tag"]), int(row["model_step"]), str(row["model_path"]))
+        key = (
+            str(row["model_tag"]),
+            int(row["model_step"]),
+            str(row["model_path"]),
+            str(row.get("eval_track") or ""),
+            str(row.get("eval_variant") or ""),
+        )
         grouped.setdefault(key, []).append(row)
 
     summary_rows: List[Dict[str, Any]] = []
-    for key, model_rows in sorted(grouped.items(), key=lambda kv: (kv[0][1], kv[0][0], kv[0][2])):
+    for key, model_rows in sorted(grouped.items(), key=lambda kv: (kv[0][3], kv[0][1], kv[0][4], kv[0][0], kv[0][2])):
         scores = [float(x["score"]) for x in model_rows if x["score"] is not None]
         success = [bool(x["success"]) for x in model_rows if x["success"] is not None]
         errors = [x for x in model_rows if x["error"]]
@@ -140,6 +193,8 @@ def main() -> None:
                 "model_tag": key[0],
                 "model_step": key[1],
                 "model_path": key[2],
+                "eval_track": key[3],
+                "eval_variant": key[4],
                 "num_cases": len(model_rows),
                 "num_scored": len(scores),
                 "num_success_labeled": len(success),
@@ -152,6 +207,13 @@ def main() -> None:
                 "throttle_value": args.throttle_value,
             }
         )
+
+    return summary_rows, details
+
+
+def main() -> None:
+    args = parse_args()
+    summary_rows, details = run_deepeval_hallucination(args)
 
     write_csv(summary_rows, args.metrics_out)
     print(f"Saved metrics to: {args.metrics_out}")
