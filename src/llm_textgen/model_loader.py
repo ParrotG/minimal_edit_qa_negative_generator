@@ -119,6 +119,7 @@ def load_generator_from_spec(
     enable_thinking: bool = False,
     strip_think_tags: bool = True,
     strip_role_markers: bool = True,
+    record_token_usage: bool = False,
     seed: int = 42,
 ) -> UnifiedTextGenerator:
     """Load UnifiedTextGenerator from one model spec."""
@@ -137,6 +138,7 @@ def load_generator_from_spec(
         enable_thinking=enable_thinking,
         strip_think_tags=strip_think_tags,
         strip_role_markers=strip_role_markers,
+        record_token_usage=record_token_usage,
         seed=seed,
     )
     generator = UnifiedTextGenerator(config=cfg)

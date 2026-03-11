@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
+from project_config import PROJECT_SETTINGS
 
 try:
     from src.llm_textgen import GeneratorModelSpec, build_generator_model_specs, load_generator_from_spec
@@ -23,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", type=str, default="validation", help="Split name when data_path is a DatasetDict.")
     parser.add_argument("--max_samples", type=int, default=-1, help="Maximum sampled rows. -1 means all.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--base_model", type=str, default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--base_model", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="Single LoRA adapter checkpoint path.")
     parser.add_argument(
         "--lora_ckpt_list_path",

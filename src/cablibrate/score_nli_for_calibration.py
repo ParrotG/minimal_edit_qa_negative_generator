@@ -4,6 +4,8 @@ import argparse
 import math
 from typing import Any, Dict, List
 
+from project_config import PROJECT_SETTINGS
+
 try:
     from src.dataio import write_jsonl
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
@@ -40,8 +42,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--question_field", type=str, default="question")
     parser.add_argument("--answer_field", type=str, default="answer")
     parser.add_argument("--label_field", type=str, default="label")
-    parser.add_argument("--positive_label_values", type=str, default="1,true,yes,supported,faithful,correct,entail")
-    parser.add_argument("--negative_label_values", type=str, default="0,false,no,unsupported,unfaithful,incorrect,neutral,contradict")
+    parser.add_argument("--positive_label_values", type=str, default=PROJECT_SETTINGS.calibration.positive_label_values)
+    parser.add_argument("--negative_label_values", type=str, default=PROJECT_SETTINGS.calibration.negative_label_values)
     parser.add_argument("--allow_unlabeled", action=argparse.BooleanOptionalAction, default=False)
 
     parser.add_argument("--model_tag_field", type=str, default="model_tag")

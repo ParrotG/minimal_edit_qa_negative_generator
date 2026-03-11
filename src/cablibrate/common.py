@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
+from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+
+try:
+    from src.dataio import read_jsonl_list
+    from src.prompt import build_qa_premise
+    from src.qa_protocol import parse_structured_output
+except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
+    from dataio import read_jsonl_list
+    from prompt import build_qa_premise
+    from qa_protocol import parse_structured_output
 
 
 def normalize_list(value: Any) -> List[str]:
@@ -52,6 +63,15 @@ def load_dataset_split(data_path: str, split: str) -> Dataset:
         if isinstance(ds_obj, Dataset):
             return ds_obj
         raise ValueError(f"Unsupported dataset object from {data_path}: {type(ds_obj)}")
+    lower_path = str(data_path).lower()
+    if lower_path.endswith(".jsonl"):
+        return Dataset.from_list(read_jsonl_list(data_path))
+    if lower_path.endswith(".json"):
+        with open(data_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, list):
+            return Dataset.from_list(payload)
+        raise ValueError(f"JSON calibration input must be a list of rows: {data_path}")
     return load_dataset("json", data_files=data_path, split="train")
 
 
@@ -292,3 +312,217 @@ def iter_grid(a_values: Iterable[float], b_values: Iterable[float]) -> Iterable[
         for b in b_values:
             yield float(a), float(b)
 
+
+def parse_human_label(value: Any) -> Optional[bool]:
+    """Parse human annotation label to a boolean value."""
+
+    return parse_label_to_bool(
+        value,
+        positive_values={"1", "true", "yes", "y", "supported", "correct", "equivalent", "match"},
+        negative_values={"0", "false", "no", "n", "unsupported", "incorrect", "not_equivalent", "mismatch"},
+    )
+
+
+def _extract_reference_answer(row: Dict[str, Any]) -> str:
+    direct = str(row.get("reference_answer") or "").strip()
+    if direct:
+        return direct
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict):
+        return str(metadata.get("reference_answer") or "").strip()
+    return ""
+
+
+def _extract_structured_payload(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    parsed_output = row.get("parsed_output")
+    if isinstance(parsed_output, dict):
+        return dict(parsed_output)
+    raw_output = str(row.get("raw_output") or "").strip()
+    if not raw_output:
+        return None
+    parse_result = parse_structured_output(raw_output)
+    if not parse_result.ok or parse_result.parsed is None:
+        return None
+    return parse_result.parsed.model_dump(mode="json")
+
+
+def extract_final_answer_text(row: Dict[str, Any]) -> str:
+    """Extract the final answer text from either structured or flat rows."""
+
+    structured = _extract_structured_payload(row)
+    if structured:
+        return str(structured.get("answer") or "").strip()
+    return _extract_answer(row, answer_field="answer")
+
+
+def extract_rationale_text(row: Dict[str, Any]) -> str:
+    """Extract rationale text from a structured payload when available."""
+
+    structured = _extract_structured_payload(row)
+    if not structured:
+        return ""
+    return str(structured.get("rationale") or "").strip()
+
+
+def extract_evidence_text(row: Dict[str, Any]) -> str:
+    """Extract a human-readable evidence string from structured output."""
+
+    structured = _extract_structured_payload(row)
+    if not structured:
+        return ""
+    evidence = structured.get("evidence")
+    if not isinstance(evidence, list):
+        return ""
+    quotes: List[str] = []
+    for item in evidence:
+        if isinstance(item, dict):
+            quote = str(item.get("quote") or "").strip()
+            if quote:
+                quotes.append(quote)
+    return "\n".join(quotes).strip()
+
+
+def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: int) -> Optional[Dict[str, Any]]:
+    """Build one annotation-pack row for a task type from a mixed evaluation row."""
+
+    question = _extract_question(row, question_field="question")
+    knowledge = _extract_knowledge(row, knowledge_field="knowledge", context_field="context")
+    answer = extract_final_answer_text(row)
+    reference_answer = _extract_reference_answer(row)
+    rationale = extract_rationale_text(row)
+    evidence_text = extract_evidence_text(row)
+
+    premise_text = ""
+    hypothesis_text = ""
+    if task_type == "nli_flat":
+        if not question or not knowledge or not answer:
+            return None
+        premise_text = build_qa_premise(knowledge=knowledge, question=question)
+        hypothesis_text = answer
+    elif task_type == "nli_structured":
+        if not question or not evidence_text or not rationale or not answer:
+            return None
+        premise_text = build_qa_premise(knowledge=evidence_text, question=question)
+        hypothesis_text = f"{rationale}\nTherefore the answer is {answer}"
+    elif task_type == "matcher":
+        if not question or not knowledge or not reference_answer or not answer:
+            return None
+    else:
+        raise ValueError(f"Unsupported task_type: {task_type}")
+
+    sample_id = safe_int(row.get("sample_id"), idx)
+    source_id = str(row.get("source_id") or sample_id)
+    model_tag = str(row.get("model_tag") or "model")
+    model_step = safe_int(row.get("model_step"), 0)
+    model_path = str(row.get("model_path") or model_tag)
+    return {
+        "task_type": task_type,
+        "pack_id": pack_id,
+        "sample_id": sample_id,
+        "source_id": source_id,
+        "model_tag": model_tag,
+        "model_step": model_step,
+        "model_path": model_path,
+        "question": question,
+        "knowledge": knowledge,
+        "reference_answer": reference_answer,
+        "answer": answer,
+        "evidence_text": evidence_text,
+        "rationale": rationale,
+        "premise_text": premise_text,
+        "hypothesis_text": hypothesis_text,
+        "human_label": None,
+        "human_notes": "",
+    }
+
+
+def build_annotation_pack_rows(
+    *,
+    rows: Sequence[Dict[str, Any]],
+    task_types: Sequence[str],
+    max_samples_per_task: int,
+    seed: int,
+    pack_id: str,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Build a mixed annotation pack with deterministic per-task sampling."""
+
+    ds = Dataset.from_list([dict(row) for row in rows]).shuffle(seed=seed)
+    shuffled_rows = [dict(row) for row in ds]
+    out_rows: List[Dict[str, Any]] = []
+    metrics: Dict[str, Any] = {
+        "pack_id": pack_id,
+        "num_input_rows": len(rows),
+        "tasks": {},
+    }
+
+    for task_type in task_types:
+        kept = 0
+        skipped_missing = 0
+        for idx, row in enumerate(shuffled_rows):
+            pack_row = build_pack_row(row=row, task_type=task_type, pack_id=pack_id, idx=idx)
+            if pack_row is None:
+                skipped_missing += 1
+                continue
+            out_rows.append(pack_row)
+            kept += 1
+            if max_samples_per_task > 0 and kept >= max_samples_per_task:
+                break
+        metrics["tasks"][task_type] = {
+            "num_kept": kept,
+            "num_skipped_missing_fields": skipped_missing,
+        }
+
+    return out_rows, metrics
+
+
+def load_annotation_rows(data_path: str, split: str, seed: int, max_samples: int) -> List[Dict[str, Any]]:
+    """Load human-annotated pack rows and normalize the binary human label."""
+
+    ds = load_dataset_split(data_path=data_path, split=split).shuffle(seed=seed)
+    rows: List[Dict[str, Any]] = []
+    for idx, row in enumerate(ds):
+        task_type = str(row.get("task_type") or "").strip()
+        if not task_type:
+            continue
+        normalized = dict(row)
+        normalized["task_type"] = task_type
+        normalized["sample_id"] = safe_int(row.get("sample_id"), idx)
+        normalized["source_id"] = str(row.get("source_id") or normalized["sample_id"])
+        normalized["model_tag"] = str(row.get("model_tag") or "model")
+        normalized["model_step"] = safe_int(row.get("model_step"), 0)
+        normalized["model_path"] = str(row.get("model_path") or normalized["model_tag"])
+        normalized["human_label_bool"] = parse_human_label(row.get("human_label"))
+        rows.append(normalized)
+        if max_samples > 0 and len(rows) >= max_samples:
+            break
+    return rows
+
+
+def group_rows_by_task_and_model(rows: Sequence[Dict[str, Any]]) -> Dict[Tuple[str, str, int, str], List[Dict[str, Any]]]:
+    """Group rows by task type and model identifiers."""
+
+    grouped: Dict[Tuple[str, str, int, str], List[Dict[str, Any]]] = {}
+    for row in rows:
+        key = (
+            str(row.get("task_type") or ""),
+            str(row.get("model_tag") or "model"),
+            safe_int(row.get("model_step"), 0),
+            str(row.get("model_path") or row.get("model_tag") or "model"),
+        )
+        grouped.setdefault(key, []).append(dict(row))
+    return grouped
+
+
+def summarize_annotation_labels(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Summarize label availability for an annotation pack."""
+
+    task_counter = Counter(str(row.get("task_type") or "") for row in rows)
+    labeled_counter = Counter(
+        str(row.get("task_type") or "") for row in rows if parse_human_label(row.get("human_label")) is not None
+    )
+    return {
+        "num_rows": len(rows),
+        "num_labeled": sum(labeled_counter.values()),
+        "task_counts": dict(task_counter),
+        "task_labeled_counts": dict(labeled_counter),
+    }

@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import spacy
 
+from .config import JudgeConfig
+
 
 @dataclass(frozen=True)
 class EntitySpan:
@@ -20,7 +22,7 @@ class EntitySpan:
 class NERTagger:
     """Lightweight wrapper around spaCy named-entity recognition."""
 
-    def __init__(self, model_name: str = "en_core_web_trf") -> None:
+    def __init__(self, model_name: str = JudgeConfig.qa_spacy_model) -> None:
         self.nlp = spacy.load(model_name)
 
     def extract(self, text: str) -> List[EntitySpan]:

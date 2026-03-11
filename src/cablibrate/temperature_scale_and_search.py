@@ -4,6 +4,8 @@ import argparse
 import math
 from typing import Any, Dict, List, Optional, Sequence
 
+from project_config import PROJECT_SETTINGS
+
 try:
     from src.dataio import write_jsonl
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
@@ -21,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--label_field", type=str, default="gold_supported")
 
-    parser.add_argument("--fit_mode", type=str, default="per_model", choices=["per_model", "global"])
+    parser.add_argument("--fit_mode", type=str, default=PROJECT_SETTINGS.calibration.fit_mode, choices=["per_model", "global"])
     parser.add_argument("--temperature_min", type=float, default=0.05)
     parser.add_argument("--temperature_max", type=float, default=5.0)
     parser.add_argument("--temperature_step", type=float, default=0.01)
@@ -29,31 +31,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--search_objective",
         type=str,
-        default="cohen_kappa",
+        default=PROJECT_SETTINGS.calibration.search_objective,
         choices=["cohen_kappa", "f1", "accuracy"],
         help="Objective for non-reject methods.",
     )
     parser.add_argument(
         "--reject_alpha",
         type=float,
-        default=0.25,
+        default=PROJECT_SETTINGS.calibration.reject_alpha,
         help="Lagrangian alpha in Error(kept) + alpha * RejectRate for reject methods.",
     )
 
     parser.add_argument("--margin_threshold_values", type=str, default="")
-    parser.add_argument("--margin_threshold_min", type=float, default=-4.0)
-    parser.add_argument("--margin_threshold_max", type=float, default=4.0)
-    parser.add_argument("--margin_threshold_step", type=float, default=0.1)
+    parser.add_argument("--margin_threshold_min", type=float, default=PROJECT_SETTINGS.calibration.margin_threshold_min)
+    parser.add_argument("--margin_threshold_max", type=float, default=PROJECT_SETTINGS.calibration.margin_threshold_max)
+    parser.add_argument("--margin_threshold_step", type=float, default=PROJECT_SETTINGS.calibration.margin_threshold_step)
 
     parser.add_argument("--argmax_conf_threshold_values", type=str, default="")
-    parser.add_argument("--argmax_conf_threshold_min", type=float, default=0.34)
-    parser.add_argument("--argmax_conf_threshold_max", type=float, default=0.99)
-    parser.add_argument("--argmax_conf_threshold_step", type=float, default=0.01)
+    parser.add_argument("--argmax_conf_threshold_min", type=float, default=PROJECT_SETTINGS.calibration.argmax_conf_threshold_min)
+    parser.add_argument("--argmax_conf_threshold_max", type=float, default=PROJECT_SETTINGS.calibration.argmax_conf_threshold_max)
+    parser.add_argument("--argmax_conf_threshold_step", type=float, default=PROJECT_SETTINGS.calibration.argmax_conf_threshold_step)
 
     parser.add_argument("--band_half_width_values", type=str, default="")
-    parser.add_argument("--band_half_width_min", type=float, default=0.0)
-    parser.add_argument("--band_half_width_max", type=float, default=1.0)
-    parser.add_argument("--band_half_width_step", type=float, default=0.05)
+    parser.add_argument("--band_half_width_min", type=float, default=PROJECT_SETTINGS.calibration.band_half_width_min)
+    parser.add_argument("--band_half_width_max", type=float, default=PROJECT_SETTINGS.calibration.band_half_width_max)
+    parser.add_argument("--band_half_width_step", type=float, default=PROJECT_SETTINGS.calibration.band_half_width_step)
 
     parser.add_argument("--out_calibrated_jsonl", type=str, default="calibration_temperature_scaled.jsonl")
     parser.add_argument("--out_temperature_csv", type=str, default="calibration_temperature_fit.csv")

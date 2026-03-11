@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
+from project_config import PROJECT_SETTINGS
+
 try:
     from qa_metrics.transformerMatcher import TransformerMatcher as QaMetricsTransformerMatcher
 except ImportError:  # pragma: no cover
@@ -13,7 +15,7 @@ except ImportError:  # pragma: no cover
 class TransformerMatcherConfig:
     """Configuration for qa-metrics TransformerMatcher reviewer."""
 
-    model_name: str = "zli12321/answer_equivalence_roberta-large"
+    model_name: str = PROJECT_SETTINGS.calibration.matcher_model_name
 
 
 @dataclass(frozen=True)

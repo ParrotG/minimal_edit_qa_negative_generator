@@ -5,6 +5,7 @@ from typing import List
 
 from .config import UnifiedLLMConfig
 from .generator import UnifiedTextGenerator
+from .types import LocalGenerationResult
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,7 +52,8 @@ def run_smoke_test(args: argparse.Namespace) -> int:
 
     single_output = generator.generate_one(args.prompt)
     batch_prompts: List[str] = [args.prompt, args.second_prompt]
-    batch_outputs = generator.generate_many(batch_prompts)
+    batch_results: List[LocalGenerationResult] = generator.generate_many_results(batch_prompts)
+    batch_outputs = [item.text for item in batch_results]
 
     if len(batch_outputs) != len(batch_prompts):
         raise AssertionError(

@@ -8,6 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import UnifiedLLMConfig
+from .types import LocalGenerationResult, TokenUsage
 from prompt import build_qa_answer_prefix
 
 
@@ -174,7 +175,7 @@ class UnifiedTextGenerator:
             "If the provided knowledge is insufficient, reply that you do not know based on the knowledge.\n"
         )
 
-    def _generate_batch(
+    def _generate_batch_results(
         self,
         prompts: Sequence[str],
         *,
@@ -184,7 +185,8 @@ class UnifiedTextGenerator:
         top_k: Optional[int],
         min_p: Optional[float],
         repetition_penalty: float,
-    ) -> List[str]:
+        record_token_usage: bool,
+    ) -> List[LocalGenerationResult]:
         prepared_prompts = list(prompts)
         inputs = self.tokenizer(
             prepared_prompts,
@@ -226,11 +228,58 @@ class UnifiedTextGenerator:
                 gen_ids = self.model.generate(**inputs, **gen_kwargs)
 
         prompt_padded_len = int(inputs["input_ids"].shape[1])
-        out: List[str] = []
+        prompt_lengths = [int(value) for value in inputs["attention_mask"].sum(dim=1).tolist()]
+        out: List[LocalGenerationResult] = []
         for idx in range(len(prepared_prompts)):
             text_ids = gen_ids[idx][prompt_padded_len:]
-            out.append(self.tokenizer.decode(text_ids, skip_special_tokens=True))
+            token_usage = None
+            if record_token_usage:
+                prompt_tokens = int(prompt_lengths[idx])
+                completion_tokens = int(text_ids.shape[0])
+                token_usage = TokenUsage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=prompt_tokens + completion_tokens,
+                    source="estimated",
+                )
+            out.append(
+                LocalGenerationResult(
+                    text=self.tokenizer.decode(text_ids, skip_special_tokens=True),
+                    token_usage=token_usage,
+                )
+            )
         return out
+
+    def generate_one_result(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        min_p: Optional[float] = None,
+        repetition_penalty: Optional[float] = None,
+        use_chat_template: Optional[bool] = None,
+        enable_thinking: Optional[bool] = None,
+        strip_think_tags: Optional[bool] = None,
+        strip_role_markers: Optional[bool] = None,
+    ) -> LocalGenerationResult:
+        """Generate one result object for a single prompt."""
+
+        return self.generate_many_results(
+            [prompt],
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+            use_chat_template=use_chat_template,
+            enable_thinking=enable_thinking,
+            strip_think_tags=strip_think_tags,
+            strip_role_markers=strip_role_markers,
+        )[0]
 
     def generate_one(
         self,
@@ -251,8 +300,8 @@ class UnifiedTextGenerator:
 
         if prompt is None:
             raise ValueError("prompt must not be None.")
-        outputs = self.generate_many(
-            [prompt],
+        output = self.generate_one_result(
+            prompt,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -264,9 +313,9 @@ class UnifiedTextGenerator:
             strip_think_tags=strip_think_tags,
             strip_role_markers=strip_role_markers,
         )
-        return outputs[0]
+        return output.text
 
-    def generate_many(
+    def generate_many_results(
         self,
         prompts: Sequence[str],
         *,
@@ -281,8 +330,8 @@ class UnifiedTextGenerator:
         enable_thinking: Optional[bool] = None,
         strip_think_tags: Optional[bool] = None,
         strip_role_markers: Optional[bool] = None,
-    ) -> List[str]:
-        """Generate texts for a list of input prompts."""
+    ) -> List[LocalGenerationResult]:
+        """Generate result objects for a list of input prompts."""
 
         self._ensure_model_loaded()
         if not prompts:
@@ -313,11 +362,11 @@ class UnifiedTextGenerator:
             for prompt in text_prompts
         ]
 
-        raw_outputs: List[str] = []
+        raw_outputs: List[LocalGenerationResult] = []
         for start in range(0, len(prepared_prompts), resolved_batch_size):
             batch_prompts = prepared_prompts[start : start + resolved_batch_size]
             raw_outputs.extend(
-                self._generate_batch(
+                self._generate_batch_results(
                     batch_prompts,
                     max_new_tokens=resolved_max_new_tokens,
                     temperature=resolved_temperature,
@@ -325,16 +374,56 @@ class UnifiedTextGenerator:
                     top_k=resolved_top_k,
                     min_p=resolved_min_p,
                     repetition_penalty=resolved_repetition_penalty,
+                    record_token_usage=bool(self.config.record_token_usage),
                 )
             )
 
         return [
-            _sanitize_generated_text(
-                output,
-                strip_think_tags=resolved_strip_think_tags,
-                strip_role_markers=resolved_strip_role_markers,
+            LocalGenerationResult(
+                text=_sanitize_generated_text(
+                    output.text,
+                    strip_think_tags=resolved_strip_think_tags,
+                    strip_role_markers=resolved_strip_role_markers,
+                ),
+                token_usage=output.token_usage,
             )
             for output in raw_outputs
+        ]
+
+    def generate_many(
+        self,
+        prompts: Sequence[str],
+        *,
+        batch_size: Optional[int] = None,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        min_p: Optional[float] = None,
+        repetition_penalty: Optional[float] = None,
+        use_chat_template: Optional[bool] = None,
+        enable_thinking: Optional[bool] = None,
+        strip_think_tags: Optional[bool] = None,
+        strip_role_markers: Optional[bool] = None,
+    ) -> List[str]:
+        """Generate texts for a list of input prompts."""
+
+        return [
+            result.text
+            for result in self.generate_many_results(
+                prompts,
+                batch_size=batch_size,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                min_p=min_p,
+                repetition_penalty=repetition_penalty,
+                use_chat_template=use_chat_template,
+                enable_thinking=enable_thinking,
+                strip_think_tags=strip_think_tags,
+                strip_role_markers=strip_role_markers,
+            )
         ]
 
     def generate_one_from_qa(
@@ -403,6 +492,52 @@ class UnifiedTextGenerator:
             )
 
         return self.generate_many(
+            prompts,
+            batch_size=batch_size,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+            use_chat_template=use_chat_template,
+            enable_thinking=enable_thinking,
+            strip_think_tags=strip_think_tags,
+            strip_role_markers=strip_role_markers,
+        )
+
+    def generate_many_results_from_qa(
+        self,
+        qa_items: Sequence[Dict[str, str]],
+        *,
+        encourage_refusal: bool = False,
+        batch_size: Optional[int] = None,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        min_p: Optional[float] = None,
+        repetition_penalty: Optional[float] = None,
+        use_chat_template: Optional[bool] = None,
+        enable_thinking: Optional[bool] = None,
+        strip_think_tags: Optional[bool] = None,
+        strip_role_markers: Optional[bool] = None,
+    ) -> List[LocalGenerationResult]:
+        """Generate result objects for QA items with keys: knowledge, question."""
+
+        prompts: List[str] = []
+        for idx, item in enumerate(qa_items):
+            if "question" not in item:
+                raise ValueError(f"qa_items[{idx}] is missing required key: question")
+            prompts.append(
+                self._build_qa_prompt(
+                    knowledge=str(item.get("knowledge", "")),
+                    question=str(item["question"]),
+                    encourage_refusal=encourage_refusal,
+                )
+            )
+
+        return self.generate_many_results(
             prompts,
             batch_size=batch_size,
             max_new_tokens=max_new_tokens,

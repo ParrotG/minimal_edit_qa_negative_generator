@@ -11,6 +11,7 @@ except ImportError:  # pragma: no cover - compatibility fallback for editable in
     from llm_textgen import GeneratorModelSpec, build_generator_model_specs, load_generator_from_spec
 
 from dataio import write_jsonl
+from project_config import PROJECT_SETTINGS
 from .common import load_generation_items
 
 
@@ -24,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
 
     # Models
-    parser.add_argument("--base_model", type=str, default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--base_model", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="Single LoRA adapter checkpoint path.")
     parser.add_argument(
         "--lora_ckpt_list_path",
@@ -52,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--strip_role_markers", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--encourage_refusal", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--record_token_usage", action=argparse.BooleanOptionalAction, default=PROJECT_SETTINGS.token_budget.record_token_usage)
     parser.add_argument("--eval_track", type=str, default="base_task", help="Evaluation track label saved into generated rows.")
     parser.add_argument("--eval_variant", type=str, default="", help="Optional evaluation variant label. Defaults to think/no_think from generation mode.")
 
@@ -96,6 +98,7 @@ def run_answer_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
             enable_thinking=args.enable_thinking,
             strip_think_tags=args.strip_think_tags,
             strip_role_markers=args.strip_role_markers,
+            record_token_usage=bool(args.record_token_usage),
             seed=args.seed,
         )
 
@@ -109,7 +112,7 @@ def run_answer_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
                 for item in batch
             ]
 
-            answers = generator.generate_many_from_qa(
+            answer_results = generator.generate_many_results_from_qa(
                 qa_items=qa_items,
                 batch_size=args.batch_size,
                 max_new_tokens=args.max_new_tokens,
@@ -125,7 +128,7 @@ def run_answer_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
                 encourage_refusal=bool(args.encourage_refusal),
             )
 
-            for sample, answer in zip(batch, answers):
+            for sample, answer_result in zip(batch, answer_results):
                 generated_rows.append(
                     {
                         "model_tag": spec.tag,
@@ -142,7 +145,11 @@ def run_answer_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
                         "eval_track": str(args.eval_track or "base_task"),
                         "eval_variant": eval_variant,
                         "enable_thinking": bool(args.enable_thinking),
-                        "answer": answer,
+                        "answer": answer_result.text,
+                        "prompt_tokens": None if answer_result.token_usage is None else int(answer_result.token_usage.prompt_tokens),
+                        "completion_tokens": None if answer_result.token_usage is None else int(answer_result.token_usage.completion_tokens),
+                        "total_tokens": None if answer_result.token_usage is None else int(answer_result.token_usage.total_tokens),
+                        "token_usage_source": None if answer_result.token_usage is None else str(answer_result.token_usage.source),
                     }
                 )
 

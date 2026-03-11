@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 try:
+    from cablibrate.common import build_annotation_pack_rows, load_annotation_rows
     from qa_checks import check_answer_correctness
     from qa_checks.correctness import CorrectnessConfig
 
@@ -27,8 +28,12 @@ try:
     from model_eval.generate_structured_answers import _build_prompt, _generate_batch_with_retry
     from model_eval.merge_eval_curves import _project_rows
     from model_eval.run_sft_eval_report import _select_best_checkpoint
+    from llm_textgen.api_client import ApiGenerationConfig, ApiGenerationResult, OpenAICompatibleTextGenerator
     from llm_textgen.generator import UnifiedTextGenerator
+    from project_config import PROJECT_SETTINGS
 except ModuleNotFoundError:  # pragma: no cover
+    build_annotation_pack_rows = None
+    load_annotation_rows = None
     check_answer_correctness = None
     CorrectnessConfig = None
     parse_answer_extraction_output = None
@@ -44,6 +49,10 @@ except ModuleNotFoundError:  # pragma: no cover
     _generate_batch_with_retry = None
     _project_rows = None
     _select_best_checkpoint = None
+    ApiGenerationConfig = None
+    ApiGenerationResult = None
+    OpenAICompatibleTextGenerator = None
+    PROJECT_SETTINGS = None
     UnifiedTextGenerator = None
 
 
@@ -58,6 +67,8 @@ def _write_jsonl(path: Path, rows) -> None:
         item is not None
         for item in (
             extract_knowledge_question_from_infer_prompt,
+            build_annotation_pack_rows,
+            load_annotation_rows,
             load_dataset_split,
             load_structured_generation_items,
             normalize_generated_row,
@@ -71,6 +82,10 @@ def _write_jsonl(path: Path, rows) -> None:
             _generate_batch_with_retry,
             _project_rows,
             _select_best_checkpoint,
+            ApiGenerationConfig,
+            ApiGenerationResult,
+            OpenAICompatibleTextGenerator,
+            PROJECT_SETTINGS,
             UnifiedTextGenerator,
         )
     ),
@@ -230,13 +245,22 @@ class ModelEvalRefactorTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            def generate_many(self, prompts, **kwargs):
+            def generate_many_results(self, prompts, **kwargs):
                 self.calls += 1
                 if self.calls == 1:
-                    return ["not json at all" for _ in prompts]
+                    return [type("Result", (), {"text": "not json at all", "token_usage": None})() for _ in prompts]
                 return [
-                    '{"answerability":"answerable","evidence":[{"quote":"Acme was founded by Alice."}],'
-                    '"rationale":"The quote states the founder.","answer":"Alice","confidence":"high"}'
+                    type(
+                        "Result",
+                        (),
+                        {
+                            "text": (
+                                '{"answerability":"answerable","evidence":[{"quote":"Acme was founded by Alice."}],'
+                                '"rationale":"The quote states the founder.","answer":"Alice","confidence":"high"}'
+                            ),
+                            "token_usage": None,
+                        },
+                    )()
                     for _ in prompts
                 ]
 
@@ -275,6 +299,85 @@ class ModelEvalRefactorTests(unittest.TestCase):
         self.assertTrue(out[0]["protocol_passed"])
         self.assertFalse(out[0]["generation_failed"])
         self.assertEqual(out[0]["attempt_count"], 2)
+
+    def test_build_annotation_pack_rows_supports_structured_and_matcher_tasks(self) -> None:
+        rows = [
+            {
+                "sample_id": 1,
+                "source_id": "s1",
+                "model_tag": "base",
+                "model_step": 0,
+                "model_path": "model",
+                "question": "Who founded Acme?",
+                "knowledge": "Acme was founded by Alice.",
+                "reference_answer": "Alice",
+                "parsed_output": {
+                    "answerability": "answerable",
+                    "evidence": [{"quote": "Acme was founded by Alice."}],
+                    "rationale": "The evidence states that Alice founded Acme.",
+                    "answer": "Alice",
+                    "confidence": "high",
+                },
+            }
+        ]
+        pack_rows, metrics = build_annotation_pack_rows(
+            rows=rows,
+            task_types=["nli_structured", "matcher"],
+            max_samples_per_task=-1,
+            seed=42,
+            pack_id="pack-1",
+        )
+        self.assertEqual(len(pack_rows), 2)
+        structured_row = next(row for row in pack_rows if row["task_type"] == "nli_structured")
+        self.assertIn("Therefore the answer is Alice", structured_row["hypothesis_text"])
+        matcher_row = next(row for row in pack_rows if row["task_type"] == "matcher")
+        self.assertEqual(matcher_row["reference_answer"], "Alice")
+        self.assertEqual(metrics["tasks"]["nli_structured"]["num_kept"], 1)
+
+    def test_load_annotation_rows_parses_binary_human_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "annotations.jsonl"
+            _write_jsonl(
+                path,
+                [
+                    {
+                        "task_type": "matcher",
+                        "sample_id": 1,
+                        "source_id": "s1",
+                        "question": "Q",
+                        "knowledge": "K",
+                        "reference_answer": "A",
+                        "answer": "B",
+                        "human_label": "yes",
+                    }
+                ],
+            )
+            rows = load_annotation_rows(str(path), split="train", seed=42, max_samples=-1)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["human_label_bool"])
+
+    def test_api_generator_estimates_missing_token_usage(self) -> None:
+        cfg = ApiGenerationConfig(
+            model_name="demo-model",
+            base_url="https://example.invalid",
+            record_token_usage=True,
+            token_usage_tokenizer_name=PROJECT_SETTINGS.model.default_tokenizer_name,
+        )
+        generator = OpenAICompatibleTextGenerator(cfg=cfg, api_key="dummy")
+
+        async def fake_generate_many_async(prompts):
+            return [ApiGenerationResult(ok=True, text="Alpha", index=0, token_usage=None)]
+
+        with patch.object(generator, "_generate_many_async", side_effect=fake_generate_many_async), patch(
+            "llm_textgen.api_client.count_text_tokens_batch",
+            side_effect=[[3], [2]],
+        ):
+            results = generator.generate_many_results(["Prompt"])
+        self.assertEqual(len(results), 1)
+        self.assertIsNotNone(results[0].token_usage)
+        self.assertEqual(results[0].token_usage.prompt_tokens, 3)
+        self.assertEqual(results[0].token_usage.completion_tokens, 2)
+        self.assertEqual(results[0].token_usage.source, "estimated")
 
     def test_project_rows_uses_sft_schema_and_fills_nan(self) -> None:
         schema = ["model_tag", "model_step", "model_path", "eval_track", "eval_variant", "num_rows", "parse_ok_rate"]
@@ -355,6 +458,9 @@ class ModelEvalRefactorTests(unittest.TestCase):
         )
         self.assertTrue(selection["constraint_satisfied"])
         self.assertEqual(selection["selected_model_path"], "ckpt-200")
+
+    def test_project_settings_define_default_training_model(self) -> None:
+        self.assertEqual(PROJECT_SETTINGS.model.target_training_llm, "Qwen/Qwen3-0.6B")
 
 
 if __name__ == "__main__":

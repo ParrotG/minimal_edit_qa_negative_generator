@@ -1,131 +1,113 @@
 # Grounded-QA SFT Pipeline
 
-本仓库现已收敛为 **SFT-only** 工程，只负责：
+This repository provides an end-to-end pipeline for grounded question answering with supervised fine-tuning (SFT). It prepares grounded-QA training data from HotpotQA, generates structured supervision with a teacher model, trains an SFT model, and evaluates base models and checkpoints with protocol-aware groundedness metrics.
 
-1. Grounded-QA 训练数据构造
-2. SFT 数据集准备与训练
-3. base / ckpt 的结构化评测、DeepEval 评测与报告汇总
+The project is designed for research on grounded factuality under explicit evidence constraints. The structured target format requires the model to predict answerability, extract evidence, produce a short rationale, return an answer, and self-report confidence. The surrounding tooling supports data construction, filtering, calibration, training, validation-time checkpoint selection, and final test-time reporting.
 
-此前的 DPO、`meqng`、`ssqpg` 及其配套路线已经删除，不再作为当前研究路径的一部分。
+## Repository Layout
 
-## 目录说明
+- `src/grounded_qa`: source construction, teacher generation/validation, and SFT-record packing
+- `src/sft_trainer`: dataset preparation and SFT training
+- `src/model_eval`: validation/test generation, grounded evaluation, DeepEval, and report orchestration
+- `src/cablibrate`: optional calibration utilities for NLI and qa-metrics agreement analysis
+- `src/qa_protocol`, `src/qa_checks`, `src/qa_judge`, `src/qa_data`: shared protocol, checking, judging, and data helpers
+- `src/llm_textgen`: local and API-based text generation
+- `src/project_config`: centralized default settings for models, tokenizers, APIs, and calibration
 
-- `src/grounded_qa`: source 构造、teacher generate/validate、SFT record 打包
-- `src/sft_trainer`: SFT 数据集准备与训练脚本
-- `src/model_eval`: validation/test 生成、结构评测、task baseline、DeepEval、报告编排
-- `src/qa_protocol`, `src/qa_checks`, `src/qa_judge`, `src/qa_data`: 共享协议、检查器、判定器和数据构造工具
-- `src/llm_textgen`: 本地模型与 API 生成封装
+## Requirements
 
-## 当前数据工作流
+- Python 3.11+
+- A GPU environment for local model generation, SFT training, and NLI evaluation
+- Required environment variables for API-backed steps:
+  - `DASHSCOPE_API_KEY` for teacher generation and answer extraction
+  - Any additional key required by your DeepEval judge model, if you enable that stage
 
-### 1. Source
+Optional dependency groups:
 
-`source tag -> source build -> source prefilter -> source partition`
+- `pip install -e .[lora]` for LoRA training
+- `pip install -e .[eval]` for DeepEval
 
-- `source tag` 同时读取 HotpotQA distractor 的 `train` 与 `validation`
-- Hotpot `train` 全部进入 `train_sft_raw`
-- Hotpot `validation` 再按稳定哈希切成 `validation` / `test`
-- `answerability_split` 与 `data_split` 保持独立
+## End-to-End Workflow
 
-### 2. Teacher
+The standard execution order is:
 
-`teacher generate -> teacher validate -> build sft-records`
+1. Source tagging
+2. Mixed source building
+3. Source prefiltering
+4. Source partitioning
+5. Teacher generation
+6. Teacher validation
+7. SFT record building
+8. SFT dataset preparation
+9. SFT training
+10. Validation-time checkpoint selection and final evaluation report
 
-- 输入是 mixed answerable / unanswerable 样本
-- `teacher validate` 内部分流 answerable / unanswerable 检查链
-- answerable 使用 derived confidence
-- unanswerable 保留 teacher/self-derived 置信度路径
+## Minimal Usage
 
-### 3. SFT 与评测
-
-- `prepare_sft_dataset.py` 从 train / validation / test 三个来源准备 `DatasetDict`
-- `train_sft.py` 训练 base -> LoRA ckpt
-- `run_sft_eval_report.py` 在 validation 上选择最佳 ckpt，并在 test 上对比：
-  - best ckpt structured
-  - base protocol
-  - base task no-think
-  - base task think
-
-## 当前主命令
-
-### Source 与 teacher
+### 1. Source Tagging
 
 ```bash
 python -m grounded_qa.cli source tag \
   --out data/grounded_qa/tagged_hotpot_rows.jsonl \
-  --dataset-name hotpotqa/hotpot_qa \
-  --train-split train \
-  --validation-split validation \
-  --max-train-samples -1 \
-  --max-validation-samples -1 \
-  --seed 42 \
-  --validation-ratio 0.5 \
-  --test-ratio 0.5 \
-  --answerable-ratio 0.8 \
-  --unanswerable-ratio 0.1 \
-  --both-ratio 0.1 \
   --metrics-out outputs/grounded_qa/tag_metrics.json
+```
 
+### 2. Source Building
+
+```bash
 python -m grounded_qa.cli source build \
   --in-path data/grounded_qa/tagged_hotpot_rows.jsonl \
   --out data/grounded_qa/prepared_examples.jsonl \
-  --window-size 1 \
-  --max-supporting-facts 4 \
-  --replace-supporting-facts-min 1 \
-  --replace-supporting-facts-max 1 \
-  --same-doc-candidate-radius 1 \
-  --allow-same-doc-non-adjacent \
-  --adjacent-doc-sentence-limit 1 \
-  --include-title-prefix \
-  --seed 42 \
   --metrics-out outputs/grounded_qa/build_metrics.json
+```
 
+### 3. Source Prefiltering
+
+```bash
 python -m grounded_qa.cli source prefilter \
   --in-path data/grounded_qa/prepared_examples.jsonl \
   --out data/grounded_qa/prefiltered_examples.jsonl \
-  --tokenizer-name Qwen/Qwen3-0.6B \
-  --max-prompt-tokens 512 \
-  --enable-unanswerable-nli \
   --metrics-out outputs/grounded_qa/prefilter_metrics.json
+```
 
+### 4. Source Partitioning
+
+```bash
 python -m grounded_qa.cli source partition \
   --in-path data/grounded_qa/prefiltered_examples.jsonl \
   --out-dir data/grounded_qa/partitioned \
   --metrics-out outputs/grounded_qa/partition_metrics.json
+```
 
+### 5. Teacher Generation
+
+```bash
 python -m grounded_qa.cli teacher generate \
   --in-path data/grounded_qa/partitioned/train_sft_raw.jsonl \
   --out data/grounded_qa/teacher_candidates_train_sft.jsonl \
-  --answerable-num-candidates-per-example 3 \
-  --unanswerable-num-candidates-per-example 1 \
-  --api-model-name qwen3.5-plus \
-  --api-base-url https://dashscope-intl.aliyuncs.com/compatible-mode/v1 \
-  --api-key-env DASHSCOPE_API_KEY \
-  --max-new-tokens 512 \
-  --temperature 0.2 \
-  --top-p 0.95 \
   --metrics-out outputs/grounded_qa/teacher_generate_metrics.json
+```
 
+### 6. Teacher Validation
+
+```bash
 python -m grounded_qa.cli teacher validate \
   --in-path data/grounded_qa/teacher_candidates_train_sft.jsonl \
   --out data/grounded_qa/validated_train_sft.jsonl \
   --selected-out data/grounded_qa/selected_train_sft.jsonl \
-  --enable-semantics \
-  --semantic-drop-by-nli \
-  --semantic-decision-source full_binary \
-  --tokenizer-name Qwen/Qwen3-0.6B \
-  --max-completion-tokens 512 \
   --metrics-out outputs/grounded_qa/teacher_validate_metrics.json
+```
 
+### 7. Build SFT Records
+
+```bash
 python -m grounded_qa.cli build sft-records \
   --in-path data/grounded_qa/selected_train_sft.jsonl \
   --out data/grounded_qa/sft_records_train_sft.jsonl \
-  --prompt-style infer_v1 \
-  --keep-only-overall-ok \
   --metrics-out outputs/grounded_qa/sft_records_metrics.json
 ```
 
-### SFT 数据集与训练
+### 8. Prepare the SFT Dataset
 
 ```bash
 python -m sft_trainer.prepare_sft_dataset \
@@ -134,37 +116,58 @@ python -m sft_trainer.prepare_sft_dataset \
   --test-paths data/grounded_qa/partitioned/test.jsonl \
   --output-dir data/sft_dataset \
   --overwrite-output \
-  --max-prompt-tokens 512 \
-  --max-completion-tokens 512 \
   --metrics-out outputs/sft/prepare_dataset_metrics.json
-
-python -m sft_trainer.train_sft \
-  --data-dir data/sft_dataset \
-  --base-model Qwen/Qwen3-0.6B \
-  --output-dir ckpt/sft_lora_qwen3_06b_groundedqa
 ```
 
-### 评测与报告
+### 9. Train the SFT Model
+
+```bash
+python -m sft_trainer.train_sft \
+  --data_dir data/sft_dataset \
+  --output_dir ckpt/sft_lora_groundedqa
+```
+
+### 10. Run Validation Selection and Final Evaluation
 
 ```bash
 python -m model_eval.run_sft_eval_report \
-  --validation-data-path data/sft_dataset \
-  --test-data-path data/sft_dataset \
-  --validation-split validation \
-  --test-split test \
-  --base-model Qwen/Qwen3-0.6B \
-  --lora-ckpt-list-path ckpt/sft_lora_qwen3_06b_groundedqa \
-  --out-dir outputs/model_eval/final_report \
-  --validation-max-samples 1000 \
-  --test-max-samples 1000 \
-  --structured-max-new-tokens 512 \
-  --base-protocol-max-new-tokens 512 \
-  --base-task-max-new-tokens 512 \
-  --base-task-think-max-new-tokens 1024
+  --validation_data_path data/sft_dataset \
+  --test_data_path data/sft_dataset \
+  --lora_ckpt_list_path ckpt/sft_lora_groundedqa \
+  --out_dir outputs/model_eval/final_report
 ```
 
-## 说明
+## Optional Calibration
 
-- 结构化评测口径见 `src/model_eval/eval_grounded_qa.py`
-- task baseline 使用 LLM 做答案抽取与拒答识别，再做 strict/matcher correctness 与语义判定
-- DeepEval 已支持 structured 模式，直接对 `rationale + answer` 做 hallucination 评测
+Calibration is optional. The repository already ships default judge settings, but you can build a manual annotation pack and compare model judgments against human labels when recalibration is needed.
+
+### Build a Manual Annotation Pack
+
+```bash
+python -m cablibrate.build_annotation_pack \
+  --data_path outputs/model_eval/sft_val_structured_details.jsonl \
+  --out_jsonl outputs/calibration/annotation_pack.jsonl \
+  --metrics_out outputs/calibration/annotation_pack_metrics.json
+```
+
+### Evaluate Human-Annotated Calibration Data
+
+```bash
+python -m cablibrate.evaluate_annotation_pack \
+  --data_path outputs/calibration/annotation_pack_labeled.jsonl \
+  --out_jsonl outputs/calibration/scored_rows.jsonl \
+  --summary_csv outputs/calibration/summary.csv \
+  --best_out outputs/calibration/best_params.json
+```
+
+The annotation pack supports three task types:
+
+- `nli_flat`: `knowledge + question + answer`
+- `nli_structured`: `evidence + question + rationale + answer`
+- `matcher`: human-readable `knowledge + question + reference_answer + answer`, with matcher scoring based on `question + reference_answer + answer`
+
+## Notes
+
+- The default target training model and tokenizer are centrally managed in `src/project_config/settings.py`.
+- Token usage accounting is available in `llm_textgen` and can be enabled by generation callers when comparing test-time cost.
+- The main validation/test report workflow writes structured evaluation curves, confidence analysis, and DeepEval outputs into one report directory.

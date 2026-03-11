@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover - compatibility fallback for editable in
     from llm_textgen import GeneratorModelSpec, build_generator_model_specs, load_generator_from_spec
 
 from dataio import write_jsonl
+from project_config import PROJECT_SETTINGS
 from qa_checks import check_protocol_constraints
 from qa_protocol import build_infer_prompt, build_teacher_prompt, parse_structured_output
 
@@ -24,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", type=str, default="validation", help="Split name when data_path is a DatasetDict.")
     parser.add_argument("--max_samples", type=int, default=200, help="Maximum sampled rows. -1 means all.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--base_model", type=str, default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--base_model", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="Single LoRA adapter checkpoint path.")
     parser.add_argument(
         "--lora_ckpt_list_path",
@@ -48,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable_thinking", action="store_true")
     parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--strip_role_markers", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--record_token_usage", action=argparse.BooleanOptionalAction, default=PROJECT_SETTINGS.token_budget.record_token_usage)
     parser.add_argument("--eval_track", type=str, default="", help="Optional evaluation track label saved into generated rows.")
     parser.add_argument("--eval_variant", type=str, default="", help="Optional evaluation variant label saved into generated rows.")
     parser.add_argument("--out_jsonl", type=str, required=True, help="Generated outputs JSONL path.")
@@ -152,6 +154,12 @@ def _generate_batch_with_retry(
                 "protocol_passed": False,
                 "parse_result": None,
                 "attempt_count": 0,
+                "token_usage_totals": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "source": "",
+                },
             }
         )
 
@@ -161,7 +169,7 @@ def _generate_batch_with_retry(
         if not active_indices:
             break
         prompts = [rows_state[idx]["prompt"] for idx in active_indices]
-        outputs = generator.generate_many(
+        outputs = generator.generate_many_results(
             prompts,
             batch_size=args.batch_size,
             max_new_tokens=args.max_new_tokens,
@@ -177,14 +185,21 @@ def _generate_batch_with_retry(
         )
 
         next_active: List[int] = []
-        for item_idx, raw_output in zip(active_indices, outputs):
-            parse_ok, protocol_ok, parse_result = _parse_protocol(str(raw_output))
+        for item_idx, output in zip(active_indices, outputs):
+            raw_output = str(output.text)
+            parse_ok, protocol_ok, parse_result = _parse_protocol(raw_output)
             state = rows_state[item_idx]
-            state["raw_output"] = str(raw_output)
+            state["raw_output"] = raw_output
             state["parse_ok"] = bool(parse_ok)
             state["protocol_passed"] = bool(protocol_ok)
             state["parse_result"] = parse_result
             state["attempt_count"] = attempt
+            if output.token_usage is not None:
+                token_usage_totals = state["token_usage_totals"]
+                token_usage_totals["prompt_tokens"] += int(output.token_usage.prompt_tokens)
+                token_usage_totals["completion_tokens"] += int(output.token_usage.completion_tokens)
+                token_usage_totals["total_tokens"] += int(output.token_usage.total_tokens)
+                token_usage_totals["source"] = str(output.token_usage.source)
             if bool(args.retry_on_protocol_fail) and not protocol_ok and attempt < effective_attempts:
                 next_active.append(item_idx)
         active_indices = next_active
@@ -225,6 +240,26 @@ def _generate_batch_with_retry(
                 "attempt_count": int(state["attempt_count"]),
                 "parsed_output": parsed_payload,
                 "parse_errors": parse_errors,
+                "prompt_tokens": (
+                    int(state["token_usage_totals"]["prompt_tokens"])
+                    if int(state["token_usage_totals"]["total_tokens"]) > 0
+                    else None
+                ),
+                "completion_tokens": (
+                    int(state["token_usage_totals"]["completion_tokens"])
+                    if int(state["token_usage_totals"]["total_tokens"]) > 0
+                    else None
+                ),
+                "total_tokens": (
+                    int(state["token_usage_totals"]["total_tokens"])
+                    if int(state["token_usage_totals"]["total_tokens"]) > 0
+                    else None
+                ),
+                "token_usage_source": (
+                    str(state["token_usage_totals"]["source"])
+                    if int(state["token_usage_totals"]["total_tokens"]) > 0
+                    else None
+                ),
             }
         )
     return out_rows
@@ -286,6 +321,7 @@ def run_structured_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
             enable_thinking=args.enable_thinking,
             strip_think_tags=args.strip_think_tags,
             strip_role_markers=args.strip_role_markers,
+            record_token_usage=bool(args.record_token_usage),
             seed=args.seed,
         )
 

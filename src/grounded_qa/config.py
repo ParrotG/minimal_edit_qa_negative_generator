@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from llm_textgen.api_client import ApiGenerationConfig
+from project_config import PROJECT_SETTINGS
 from qa_judge.config import JudgeConfig, NLIConfig
 
 
@@ -13,19 +14,19 @@ class TeacherGenerationConfig:
     prompt_style: str = "teacher_v1"
     answerable_num_candidates_per_example: int = 3
     unanswerable_num_candidates_per_example: int = 1
-    api_model_name: str = "qwen3.5-plus"
-    api_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-    api_key_env: str = "DASHSCOPE_API_KEY"
-    api_timeout_seconds: float = 90.0
-    api_max_concurrency: int = 8
-    api_max_retries: int = 4
-    api_backoff_base_seconds: float = 0.5
-    api_backoff_max_seconds: float = 8.0
-    max_new_tokens: int = 512
-    temperature: float = 0.2
-    top_p: float = 0.95
-    seed: int = 42
-    error_log_dir: str = "log"
+    api_model_name: str = PROJECT_SETTINGS.teacher_api.model_name
+    api_base_url: str = PROJECT_SETTINGS.teacher_api.base_url
+    api_key_env: str = PROJECT_SETTINGS.teacher_api.api_key_env
+    api_timeout_seconds: float = PROJECT_SETTINGS.teacher_api.timeout_seconds
+    api_max_concurrency: int = PROJECT_SETTINGS.teacher_api.max_concurrency
+    api_max_retries: int = PROJECT_SETTINGS.teacher_api.max_retries
+    api_backoff_base_seconds: float = PROJECT_SETTINGS.teacher_api.backoff_base_seconds
+    api_backoff_max_seconds: float = PROJECT_SETTINGS.teacher_api.backoff_max_seconds
+    max_new_tokens: int = PROJECT_SETTINGS.teacher_api.max_tokens
+    temperature: float = PROJECT_SETTINGS.teacher_api.temperature
+    top_p: float = PROJECT_SETTINGS.teacher_api.top_p
+    seed: int = PROJECT_SETTINGS.teacher_api.seed
+    error_log_dir: str = PROJECT_SETTINGS.paths.error_log_dir
 
     def to_api_config(self) -> ApiGenerationConfig:
         """Convert to the reusable API generation config."""
@@ -50,8 +51,8 @@ class TeacherGenerationConfig:
 class SourcePrefilterConfig:
     """Source-stage filtering defaults for mixed prepared examples."""
 
-    tokenizer_name: str = "Qwen/Qwen3-0.6B"
-    max_prompt_tokens: int = 512
+    tokenizer_name: str = PROJECT_SETTINGS.model.default_tokenizer_name
+    max_prompt_tokens: int = PROJECT_SETTINGS.protocol.max_prompt_tokens
     enable_unanswerable_nli: bool = True
     nli_model_name: str = NLIConfig.model_name
     nli_device: str = NLIConfig.device
@@ -69,8 +70,8 @@ class ValidationConfig:
     enable_semantics: bool = True
     semantic_drop_by_nli: bool = True
     semantic_decision_source: str = "full_binary"
-    tokenizer_name: str = "Qwen/Qwen3-0.6B"
-    max_completion_tokens: int = 512
+    tokenizer_name: str = PROJECT_SETTINGS.model.default_tokenizer_name
+    max_completion_tokens: int = PROJECT_SETTINGS.protocol.max_completion_tokens
 
 
 @dataclass(frozen=True)

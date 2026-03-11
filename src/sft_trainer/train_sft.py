@@ -9,6 +9,8 @@ import torch
 from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 
+from project_config import PROJECT_SETTINGS
+
 try:
     from peft import LoraConfig, get_peft_model
 except ImportError as exc:  # pragma: no cover
@@ -19,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, required=True, help="Path from DatasetDict.save_to_disk.")
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for LoRA checkpoints.")
-    parser.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--model_name_or_path", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
     parser.add_argument("--train_epochs", type=float, default=2.0)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
     parser.add_argument("--train_batch_size", type=int, default=2)

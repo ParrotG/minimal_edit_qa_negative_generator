@@ -10,6 +10,10 @@ from typing import Any, Dict, List, Optional, Sequence
 import httpx
 
 from dataio import write_jsonl
+from project_config import PROJECT_SETTINGS
+from qa_protocol.token_budget import count_text_tokens_batch
+
+from .types import TokenUsage
 
 
 def _extract_chat_content(content: Any) -> str:
@@ -47,7 +51,9 @@ class ApiGenerationConfig:
     temperature: float = 0.2
     top_p: float = 0.95
     seed: int = 42
-    error_log_dir: str = "log"
+    error_log_dir: str = PROJECT_SETTINGS.paths.error_log_dir
+    record_token_usage: bool = PROJECT_SETTINGS.token_budget.record_token_usage
+    token_usage_tokenizer_name: str = PROJECT_SETTINGS.model.default_tokenizer_name
 
 
 @dataclass(frozen=True)
@@ -59,6 +65,7 @@ class ApiGenerationResult:
     error_type: Optional[str] = None
     error_message: Optional[str] = None
     index: int = 0
+    token_usage: Optional[TokenUsage] = None
 
 
 API_ERROR_PLACEHOLDER = "__API_GENERATION_ERROR__"
@@ -94,6 +101,25 @@ class OpenAICompatibleTextGenerator:
             "enable_thinking": False,
         }
 
+    @staticmethod
+    def _usage_from_provider_payload(data: Dict[str, Any]) -> Optional[TokenUsage]:
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            return None
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        total_tokens = usage.get("total_tokens")
+        if prompt_tokens is None or completion_tokens is None:
+            return None
+        if total_tokens is None:
+            total_tokens = int(prompt_tokens) + int(completion_tokens)
+        return TokenUsage(
+            prompt_tokens=int(prompt_tokens),
+            completion_tokens=int(completion_tokens),
+            total_tokens=int(total_tokens),
+            source="provider",
+        )
+
     async def _post_with_retry(self, client: httpx.AsyncClient, prompt: str, seed: int) -> Dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -122,14 +148,19 @@ class OpenAICompatibleTextGenerator:
 
         raise RuntimeError("API retry loop exited unexpectedly.")
 
-    async def _generate_one(self, client: httpx.AsyncClient, prompt: str, index: int) -> str:
+    async def _generate_one(self, client: httpx.AsyncClient, prompt: str, index: int) -> ApiGenerationResult:
         data = await self._post_with_retry(client=client, prompt=prompt, seed=self.cfg.seed + index)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not isinstance(choices, list) or not choices:
             raise RuntimeError("API response has no choices.")
         choice = choices[0] if isinstance(choices[0], dict) else {}
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-        return _extract_chat_content(message.get("content"))
+        return ApiGenerationResult(
+            ok=True,
+            text=_extract_chat_content(message.get("content")),
+            index=index,
+            token_usage=self._usage_from_provider_payload(data),
+        )
 
     async def _generate_many_async(self, prompts: Sequence[str]) -> List[ApiGenerationResult]:
         concurrency = max(1, int(self.cfg.max_concurrency))
@@ -142,8 +173,7 @@ class OpenAICompatibleTextGenerator:
             async def _task(index: int, prompt: str) -> ApiGenerationResult:
                 async with sem:
                     try:
-                        text = await self._generate_one(client=client, prompt=prompt, index=index)
-                        return ApiGenerationResult(ok=True, text=text, index=index)
+                        return await self._generate_one(client=client, prompt=prompt, index=index)
                     except Exception as exc:
                         return ApiGenerationResult(
                             ok=False,
@@ -154,6 +184,47 @@ class OpenAICompatibleTextGenerator:
                         )
 
             return list(await asyncio.gather(*[_task(idx, prompt) for idx, prompt in enumerate(prompts)]))
+
+    def _estimate_missing_token_usage(
+        self,
+        prompts: Sequence[str],
+        results: Sequence[ApiGenerationResult],
+    ) -> List[ApiGenerationResult]:
+        if not self.cfg.record_token_usage:
+            return list(results)
+
+        missing_indices = [idx for idx, result in enumerate(results) if result.ok and result.token_usage is None]
+        if not missing_indices:
+            return list(results)
+
+        prompt_counts = count_text_tokens_batch(
+            [str(prompts[idx]) for idx in missing_indices],
+            tokenizer_name=self.cfg.token_usage_tokenizer_name,
+            batch_size=PROJECT_SETTINGS.token_budget.count_batch_size,
+        )
+        completion_counts = count_text_tokens_batch(
+            [str(results[idx].text) for idx in missing_indices],
+            tokenizer_name=self.cfg.token_usage_tokenizer_name,
+            batch_size=PROJECT_SETTINGS.token_budget.count_batch_size,
+        )
+        updated = list(results)
+        for offset, result_idx in enumerate(missing_indices):
+            prompt_tokens = int(prompt_counts[offset])
+            completion_tokens = int(completion_counts[offset])
+            updated[result_idx] = ApiGenerationResult(
+                ok=updated[result_idx].ok,
+                text=updated[result_idx].text,
+                error_type=updated[result_idx].error_type,
+                error_message=updated[result_idx].error_message,
+                index=updated[result_idx].index,
+                token_usage=TokenUsage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=prompt_tokens + completion_tokens,
+                    source="estimated",
+                ),
+            )
+        return updated
 
     def _write_error_log(self, prompts: Sequence[str], results: Sequence[ApiGenerationResult]) -> Optional[str]:
         error_rows: List[Dict[str, Any]] = []
@@ -185,6 +256,7 @@ class OpenAICompatibleTextGenerator:
             return []
         prompt_list = list(prompts)
         results = asyncio.run(self._generate_many_async(prompt_list))
+        results = self._estimate_missing_token_usage(prompt_list, results)
         self._write_error_log(prompt_list, results)
         return results
 

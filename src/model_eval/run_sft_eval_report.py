@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from dataio import write_json, write_jsonl
+from project_config import PROJECT_SETTINGS
 from qa_checks.correctness import CorrectnessConfig
 from qa_judge.config import JudgeConfig, NLIConfig
 
@@ -33,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation_max_samples", type=int, default=-1)
     parser.add_argument("--test_max_samples", type=int, default=-1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--base_model", type=str, default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--base_model", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
     parser.add_argument("--lora_ckpt_path", type=str, default=None)
     parser.add_argument("--lora_ckpt_list_path", type=str, default=None)
     parser.add_argument("--out_dir", type=str, required=True)
@@ -45,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base_protocol_max_new_tokens", type=int, default=512)
     parser.add_argument("--base_task_max_new_tokens", type=int, default=512)
     parser.add_argument("--base_task_think_max_new_tokens", type=int, default=1024)
+    parser.add_argument("--record_token_usage", action=argparse.BooleanOptionalAction, default=PROJECT_SETTINGS.token_budget.record_token_usage)
     parser.add_argument("--fewshot_k", type=int, default=2)
     parser.add_argument("--protocol_max_attempts", type=int, default=3)
     parser.add_argument("--protocol_temperature", type=float, default=0.2)
@@ -356,6 +358,7 @@ def _structured_generation_args(
         enable_thinking=False,
         strip_think_tags=True,
         strip_role_markers=True,
+        record_token_usage=bool(args.record_token_usage),
         eval_track=eval_track,
         eval_variant=eval_variant,
         out_jsonl="",
@@ -393,6 +396,7 @@ def _task_generation_args(
         strip_think_tags=True,
         strip_role_markers=True,
         encourage_refusal=True,
+        record_token_usage=bool(args.record_token_usage),
         eval_track="base_task",
         eval_variant=eval_variant,
         out_jsonl="",

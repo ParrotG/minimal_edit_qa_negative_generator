@@ -14,10 +14,12 @@ try:
     from src.qa_protocol import build_infer_prompt
     from src.qa_protocol.token_budget import count_text_tokens_batch
     from src.dataio import read_jsonl, write_json
+    from src.project_config import PROJECT_SETTINGS
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
     from qa_protocol import build_infer_prompt
     from qa_protocol.token_budget import count_text_tokens_batch
     from dataio import read_jsonl, write_json
+    from project_config import PROJECT_SETTINGS
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,7 +91,12 @@ def parse_args() -> argparse.Namespace:
         default=-1,
         help="Maximum unanswerable rows for test split.",
     )
-    parser.add_argument("--tokenizer_name", type=str, default="Qwen/Qwen3-0.6B", help="Tokenizer used for token filtering.")
+    parser.add_argument(
+        "--tokenizer_name",
+        type=str,
+        default=PROJECT_SETTINGS.model.default_tokenizer_name,
+        help="Tokenizer used for token filtering.",
+    )
     parser.add_argument(
         "--max_prompt_tokens",
         type=int,

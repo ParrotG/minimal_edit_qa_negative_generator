@@ -5,26 +5,27 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from llm_textgen.api_client import ApiGenerationConfig, OpenAICompatibleTextGenerator
+from project_config import PROJECT_SETTINGS
 
 
 @dataclass(frozen=True)
 class AnswerExtractionConfig:
     """Configuration for LLM-based answer extraction and refusal detection."""
 
-    api_model_name: str = "qwen-plus"
-    api_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-    api_key_env: str = "DASHSCOPE_API_KEY"
-    api_timeout_seconds: float = 90.0
-    api_max_concurrency: int = 64
-    api_max_retries: int = 4
-    api_backoff_base_seconds: float = 0.5
-    api_backoff_max_seconds: float = 8.0
-    max_new_tokens: int = 256
-    temperature: float = 0.0
-    top_p: float = 0.95
-    seed: int = 42
-    error_log_dir: str = "log"
-    max_attempts: int = 2
+    api_model_name: str = PROJECT_SETTINGS.answer_extraction_api.model_name
+    api_base_url: str = PROJECT_SETTINGS.answer_extraction_api.base_url
+    api_key_env: str = PROJECT_SETTINGS.answer_extraction_api.api_key_env
+    api_timeout_seconds: float = PROJECT_SETTINGS.answer_extraction_api.timeout_seconds
+    api_max_concurrency: int = PROJECT_SETTINGS.answer_extraction_api.max_concurrency
+    api_max_retries: int = PROJECT_SETTINGS.answer_extraction_api.max_retries
+    api_backoff_base_seconds: float = PROJECT_SETTINGS.answer_extraction_api.backoff_base_seconds
+    api_backoff_max_seconds: float = PROJECT_SETTINGS.answer_extraction_api.backoff_max_seconds
+    max_new_tokens: int = PROJECT_SETTINGS.answer_extraction_api.max_tokens
+    temperature: float = PROJECT_SETTINGS.answer_extraction_api.temperature
+    top_p: float = PROJECT_SETTINGS.answer_extraction_api.top_p
+    seed: int = PROJECT_SETTINGS.answer_extraction_api.seed
+    error_log_dir: str = PROJECT_SETTINGS.paths.error_log_dir
+    max_attempts: int = PROJECT_SETTINGS.answer_extraction_api.max_attempts
 
     def to_api_config(self) -> ApiGenerationConfig:
         return ApiGenerationConfig(
