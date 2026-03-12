@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 try:
+    from calibrate.build_annotation_pack import _enrich_rows_from_sibling_generations
     from calibrate.common import build_annotation_pack_rows, group_rows, load_annotation_rows
     from qa_checks import check_answer_correctness
     from qa_checks.correctness import CorrectnessConfig
@@ -27,7 +28,7 @@ try:
         AnswerEquivalenceTransformerMatcher,
         TransformerMatcherConfig,
     )
-    from model_eval.eval_grounded_qa import _binary_auroc
+    from model_eval.eval_grounded_qa import _normalized_resolution
     from model_eval.generate_structured_answers import _build_prompt, _generate_batch_with_retry
     from model_eval.merge_eval_curves import _project_rows
     from model_eval.run_sft_eval_report import _select_best_checkpoint, run_sft_eval_report
@@ -35,6 +36,7 @@ try:
     from llm_textgen.generator import UnifiedTextGenerator
     from project_config import PROJECT_SETTINGS
 except ModuleNotFoundError:  # pragma: no cover
+    _enrich_rows_from_sibling_generations = None
     build_annotation_pack_rows = None
     group_rows = None
     load_annotation_rows = None
@@ -51,7 +53,7 @@ except ModuleNotFoundError:  # pragma: no cover
     normalize_generated_row = None
     AnswerEquivalenceTransformerMatcher = None
     TransformerMatcherConfig = None
-    _binary_auroc = None
+    _normalized_resolution = None
     _build_prompt = None
     _generate_batch_with_retry = None
     _project_rows = None
@@ -78,6 +80,7 @@ def _write_jsonl(path: Path, rows) -> None:
             flat_content_eval_skipped_reason,
             is_flat_answerable_for_content_eval,
             is_structured_answerable_for_semantic_eval,
+            _enrich_rows_from_sibling_generations,
             build_annotation_pack_rows,
             group_rows,
             load_annotation_rows,
@@ -89,7 +92,7 @@ def _write_jsonl(path: Path, rows) -> None:
             extract_structured_output_text,
             AnswerEquivalenceTransformerMatcher,
             TransformerMatcherConfig,
-            _binary_auroc,
+            _normalized_resolution,
             _build_prompt,
             _generate_batch_with_retry,
             _project_rows,
@@ -441,6 +444,97 @@ class ModelEvalRefactorTests(unittest.TestCase):
         self.assertEqual(metrics["tasks"]["nli_flat"]["num_skipped_missing_eval_state"], 1)
         self.assertEqual(metrics["tasks"]["matcher"]["num_skipped_missing_eval_state"], 1)
 
+    def test_build_annotation_pack_rows_tracks_input_sources(self) -> None:
+        rows = [
+            {
+                "input_source_path": "a.jsonl",
+                "sample_id": 1,
+                "source_id": "s1",
+                "model_tag": "base",
+                "model_step": 0,
+                "model_path": "model",
+                "question": "Who founded Acme?",
+                "knowledge": "Acme was founded by Alice.",
+                "reference_answer": "Alice",
+                "extraction_parse_ok": True,
+                "refusal_detected": False,
+                "extracted_answer": "Alice",
+                "pred_answerability": "answerable",
+            },
+            {
+                "input_source_path": "b.jsonl",
+                "sample_id": 2,
+                "source_id": "s2",
+                "model_tag": "base",
+                "model_step": 0,
+                "model_path": "model",
+                "question": "Who founded Beta?",
+                "knowledge": "Beta was founded by Bob.",
+                "reference_answer": "Bob",
+                "extraction_parse_ok": True,
+                "refusal_detected": False,
+                "extracted_answer": "Bob",
+                "pred_answerability": "answerable",
+            },
+        ]
+        pack_rows, metrics = build_annotation_pack_rows(
+            rows=rows,
+            task_types=["nli_flat"],
+            max_samples_per_task=-1,
+            seed=42,
+            pack_id="pack-4",
+        )
+        self.assertEqual(len(pack_rows), 2)
+        self.assertEqual({row["input_source_path"] for row in pack_rows}, {"a.jsonl", "b.jsonl"})
+        self.assertEqual(metrics["input_sources"]["a.jsonl"]["num_input_rows"], 1)
+        self.assertEqual(metrics["input_sources"]["b.jsonl"]["num_input_rows"], 1)
+
+    def test_annotation_pack_can_enrich_old_details_from_sibling_generations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            details_path = Path(tmpdir) / "base_task_think_details.jsonl"
+            generations_path = Path(tmpdir) / "base_task_think_generations.jsonl"
+            _write_jsonl(
+                details_path,
+                [
+                    {
+                        "model_tag": "base",
+                        "model_step": 0,
+                        "model_path": "model",
+                        "eval_track": "base_task",
+                        "eval_variant": "think",
+                        "sample_id": 1,
+                        "source_id": "s1",
+                        "question": "Who founded Acme?",
+                        "reference_answer": "Alice",
+                        "extraction_parse_ok": True,
+                        "refusal_detected": False,
+                        "extracted_answer": "Alice",
+                        "pred_answerability": "answerable",
+                        "entered_content_eval": True,
+                        "correctness_ok": False,
+                    }
+                ],
+            )
+            _write_jsonl(
+                generations_path,
+                [
+                    {
+                        "model_tag": "base",
+                        "model_step": 0,
+                        "model_path": "model",
+                        "eval_track": "base_task",
+                        "eval_variant": "think",
+                        "sample_id": 1,
+                        "source_id": "s1",
+                        "question": "Who founded Acme?",
+                        "knowledge": "Acme was founded by Alice.",
+                        "reference_answer": "Alice",
+                    }
+                ],
+            )
+            enriched = _enrich_rows_from_sibling_generations(str(details_path), [dict(row) for row in load_dataset_split(str(details_path), "train")])
+        self.assertEqual(enriched[0]["knowledge"], "Acme was founded by Alice.")
+
     def test_load_annotation_rows_parses_binary_human_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "annotations.jsonl"
@@ -517,10 +611,16 @@ class ModelEvalRefactorTests(unittest.TestCase):
         self.assertIn("If the provided knowledge is insufficient", prompt)
         self.assertTrue(prompt.endswith("Answer: "))
 
-    def test_binary_auroc_uses_confidence_order(self) -> None:
-        score = _binary_auroc([1.0, 2.0, 3.0, 1.0], [0, 0, 1, 1])
-        self.assertIsNotNone(score)
-        self.assertGreaterEqual(float(score), 0.5)
+    def test_normalized_resolution_rewards_confidence_separation(self) -> None:
+        score, count = _normalized_resolution(
+            {
+                "low": [0.0, 0.0],
+                "medium": [0.0, 1.0],
+                "high": [1.0, 1.0],
+            }
+        )
+        self.assertEqual(count, 6)
+        self.assertGreater(float(score), 0.0)
 
     def test_select_best_checkpoint_prefers_hard_constraint_then_main_targets(self) -> None:
         selection = _select_best_checkpoint(
@@ -656,8 +756,6 @@ class ModelEvalRefactorTests(unittest.TestCase):
             "model_eval.run_sft_eval_report.run_task_content_baseline", return_value=([], [])
         ), patch(
             "model_eval.run_sft_eval_report.run_deepeval_hallucination", return_value=([], [])
-        ), patch(
-            "model_eval.run_sft_eval_report.merge_curve_rows", return_value=[]
         ):
             run_sft_eval_report(
                 Namespace(
@@ -724,6 +822,11 @@ class ModelEvalRefactorTests(unittest.TestCase):
                     deepeval_throttle_value=0.0,
                 )
             )
+            report_dir = Path(tmpdir) / "report"
+            self.assertTrue((report_dir / "validation_summary.csv").exists())
+            self.assertTrue((report_dir / "test_summary.csv").exists())
+            self.assertFalse((report_dir / "merged_curve.csv").exists())
+            self.assertFalse((report_dir / "final_report.md").exists())
 
         self.assertEqual(structured_calls, [("val-ds", "validation", "infer"), ("test-ds", "test", "infer"), ("test-ds", "test", "teacher_fewshot")])
         self.assertEqual(task_calls, [("test-ds", "test", "no_think"), ("test-ds", "test", "think")])

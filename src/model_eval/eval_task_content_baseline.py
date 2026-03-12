@@ -299,6 +299,7 @@ def _evaluate_model_rows(
                 "source_id": row.get("source_id"),
                 "data_split": row.get("data_split"),
                 "question": row.get("question"),
+                "knowledge": row.get("knowledge"),
                 "reference_answer": row.get("reference_answer"),
                 "raw_answer": row.get("answer"),
                 "answerability_label": row.get("answerability_label"),

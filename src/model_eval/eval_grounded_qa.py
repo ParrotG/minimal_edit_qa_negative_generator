@@ -194,21 +194,25 @@ def _spearman(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
         return None
     return _pearson(_rank_values(xs), _rank_values(ys))
 
+def _normalized_resolution(bucket_values: Dict[str, List[float]]) -> Tuple[float, int]:
+    """Compute Murphy normalized resolution for binary outcomes over confidence buckets."""
 
-def _binary_auroc(scores: Sequence[float], labels: Sequence[int]) -> Optional[float]:
-    """Compute AUROC for binary labels without external dependencies."""
-
-    if len(scores) != len(labels) or len(scores) < 2:
-        return None
-    num_pos = sum(1 for label in labels if int(label) == 1)
-    num_neg = sum(1 for label in labels if int(label) == 0)
-    if num_pos == 0 or num_neg == 0:
-        return None
-
-    ranked = _rank_values(scores)
-    pos_rank_sum = sum(rank for rank, label in zip(ranked, labels) if int(label) == 1)
-    u_stat = pos_rank_sum - (num_pos * (num_pos + 1) / 2.0)
-    return float(u_stat / float(num_pos * num_neg))
+    total = sum(len(values) for values in bucket_values.values())
+    if total <= 0:
+        return float("nan"), 0
+    all_values = [value for values in bucket_values.values() for value in values]
+    mean_y = sum(all_values) / len(all_values)
+    uncertainty = mean_y * (1.0 - mean_y)
+    if uncertainty <= 0.0:
+        return float("nan"), len(all_values)
+    resolution = 0.0
+    for values in bucket_values.values():
+        if not values:
+            continue
+        bucket_rate = sum(values) / len(values)
+        weight = len(values) / total
+        resolution += weight * ((bucket_rate - mean_y) ** 2)
+    return float(resolution / uncertainty), len(all_values)
 
 
 def _empty_semantic_report() -> SemanticCheckReport:
@@ -389,9 +393,6 @@ def _evaluate_one_model(
     confidence_pairs_semantic_yes_y: List[float] = []
     confidence_pairs_semantic_margin_x: List[float] = []
     confidence_pairs_semantic_margin_y: List[float] = []
-    confidence_reliability_scores: List[float] = []
-    confidence_reliability_labels: List[int] = []
-
     confidence_bucket: Dict[str, Dict[str, List[float]]] = {
         "high": {"answerability": [], "correctness": [], "correctness_reviewed": [], "semantic_yes": [], "semantic_margin": []},
         "medium": {"answerability": [], "correctness": [], "correctness_reviewed": [], "semantic_yes": [], "semantic_margin": []},
@@ -462,13 +463,6 @@ def _evaluate_one_model(
             confidence_pairs_answerability_y.append(1.0 if answerability_match else 0.0)
             if confidence_label in confidence_bucket:
                 confidence_bucket[confidence_label]["answerability"].append(1.0 if answerability_match else 0.0)
-
-        if confidence_rank is not None and answerability_match is not None:
-            success_label = 0
-            if bool(answerability_match):
-                success_label = 1 if (not is_pred_answerable or bool(reviewed_ok)) else 0
-            confidence_reliability_scores.append(float(confidence_rank))
-            confidence_reliability_labels.append(int(success_label))
 
         if parse_ok and is_pred_answerable and confidence_rank is not None:
             if correctness_report is not None:
@@ -565,14 +559,32 @@ def _evaluate_one_model(
         "semantic_yes_rate": _safe_rate(semantic_yes, semantic_total),
         "semantic_margin_mean": _safe_mean(semantic_margins),
         "generation_failed_count": generation_failed_count,
-        "generation_failed_rate": _safe_rate(generation_failed_count, num_rows),
-        "avg_attempt_count": float(attempt_total / num_rows) if num_rows > 0 else float("nan"),
-        "success_on_first_attempt_rate": _safe_rate(success_on_first_attempt, num_rows),
-        "supporting_fact_check_enabled": False,
-        "confidence_reliability_auroc": _binary_auroc(confidence_reliability_scores, confidence_reliability_labels),
-        "confidence_reliability_num_rows": len(confidence_reliability_scores),
-        "confidence_reliability_excluded_rows": num_rows - len(confidence_reliability_scores),
+                "generation_failed_rate": _safe_rate(generation_failed_count, num_rows),
+                "avg_attempt_count": float(attempt_total / num_rows) if num_rows > 0 else float("nan"),
+                "success_on_first_attempt_rate": _safe_rate(success_on_first_attempt, num_rows),
+                "supporting_fact_check_enabled": False,
     }
+
+    answerability_resolution, answerability_resolution_count = _normalized_resolution(
+        {label: values["answerability"] for label, values in confidence_bucket.items()}
+    )
+    correctness_reviewed_resolution, correctness_reviewed_resolution_count = _normalized_resolution(
+        {label: values["correctness_reviewed"] for label, values in confidence_bucket.items()}
+    )
+    semantic_yes_resolution, semantic_yes_resolution_count = _normalized_resolution(
+        {label: values["semantic_yes"] for label, values in confidence_bucket.items()}
+    )
+
+    metrics.update(
+        {
+            "confidence_resolution_answerability": answerability_resolution,
+            "confidence_resolution_answerability_num_rows": answerability_resolution_count,
+            "confidence_resolution_correctness_reviewed_on_pred_answerable": correctness_reviewed_resolution,
+            "confidence_resolution_correctness_reviewed_on_pred_answerable_num_rows": correctness_reviewed_resolution_count,
+            "confidence_resolution_semantic_yes_on_pred_answerable": semantic_yes_resolution,
+            "confidence_resolution_semantic_yes_on_pred_answerable_num_rows": semantic_yes_resolution_count,
+        }
+    )
 
     confidence_metrics = {
         "correlations": {
@@ -613,10 +625,19 @@ def _evaluate_one_model(
             }
             for label, values in confidence_bucket.items()
         },
-        "reliability": {
-            "auroc": _binary_auroc(confidence_reliability_scores, confidence_reliability_labels),
-            "eligible_count": len(confidence_reliability_scores),
-            "excluded_count": num_rows - len(confidence_reliability_scores),
+        "resolution": {
+            "answerability": {
+                "normalized_resolution": answerability_resolution,
+                "eligible_count": answerability_resolution_count,
+            },
+            "correctness_reviewed_on_pred_answerable": {
+                "normalized_resolution": correctness_reviewed_resolution,
+                "eligible_count": correctness_reviewed_resolution_count,
+            },
+            "semantic_yes_on_pred_answerable": {
+                "normalized_resolution": semantic_yes_resolution,
+                "eligible_count": semantic_yes_resolution_count,
+            },
         },
     }
     return metrics, details, confidence_metrics

@@ -22,7 +22,6 @@ from .eval_sft_loss_curve import run_sft_loss_curve
 from .eval_task_content_baseline import run_task_content_baseline
 from .generate_answers import run_answer_generation
 from .generate_structured_answers import run_structured_generation
-from .merge_eval_curves import merge_curve_rows
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,11 +97,6 @@ def parse_args() -> argparse.Namespace:
 
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-
-
-def _write_markdown(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 def _model_key(row: Dict[str, Any]) -> Tuple[str, int, str, str, str]:
@@ -202,6 +196,84 @@ def _write_csv_and_jsonl(
         write_csv(list(csv_rows), str(csv_path))
     if jsonl_path is not None and jsonl_rows is not None:
         write_jsonl(str(jsonl_path), list(jsonl_rows))
+
+
+def _constraint_pass(row: Dict[str, Any], args: argparse.Namespace) -> bool:
+    """Evaluate hard validation constraints for one structured checkpoint row."""
+
+    try:
+        parse_ok = float(row.get("parse_ok_rate"))
+        protocol_ok = float(row.get("protocol_ok_rate_given_parse_ok"))
+        evidence_ok = float(row.get("evidence_substring_ok_rate"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        not math.isnan(parse_ok)
+        and not math.isnan(protocol_ok)
+        and not math.isnan(evidence_ok)
+        and parse_ok >= float(args.parse_ok_threshold)
+        and protocol_ok >= float(args.protocol_ok_threshold)
+        and evidence_ok >= float(args.evidence_ok_threshold)
+    )
+
+
+def _build_validation_summary_rows(
+    *,
+    eval_rows: Sequence[Dict[str, Any]],
+    loss_rows: Sequence[Dict[str, Any]],
+    selection: Dict[str, Any],
+    args: argparse.Namespace,
+) -> List[Dict[str, Any]]:
+    """Build the validation-only checkpoint comparison table."""
+
+    loss_by_key = {_model_key(row): dict(row) for row in loss_rows if _is_ckpt_row(row)}
+    selected_path = str(selection.get("selected_model_path") or "")
+    out_rows: List[Dict[str, Any]] = []
+    for row in sorted(
+        [dict(row) for row in eval_rows if _is_ckpt_row(row)],
+        key=lambda item: int(item.get("model_step") or 0),
+    ):
+        loss_row = loss_by_key.get(_model_key(row), {})
+        out_rows.append(
+            {
+                **row,
+                "mean_loss": loss_row.get("mean_loss"),
+                "num_used_rows": loss_row.get("num_used_rows"),
+                "constraint_satisfied": _constraint_pass(row, args),
+                "selected_best": str(row.get("model_path") or "") == selected_path,
+            }
+        )
+    return out_rows
+
+
+def _build_test_summary_rows(
+    *,
+    track_rows: Sequence[Dict[str, Any]],
+    deepeval_rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build the final test comparison table with DeepEval merged in."""
+
+    deepeval_by_key = {_model_key(row): dict(row) for row in deepeval_rows}
+    out_rows: List[Dict[str, Any]] = []
+    for row in sorted(
+        [dict(row) for row in track_rows],
+        key=lambda item: (str(item.get("eval_track") or ""), int(item.get("model_step") or 0), str(item.get("eval_variant") or "")),
+    ):
+        deepeval_row = deepeval_by_key.get(_model_key(row), {})
+        out_rows.append(
+            {
+                **row,
+                "deepeval_num_cases": deepeval_row.get("num_cases"),
+                "deepeval_num_scored": deepeval_row.get("num_scored"),
+                "deepeval_num_success_labeled": deepeval_row.get("num_success_labeled"),
+                "deepeval_num_errors": deepeval_row.get("num_errors"),
+                "deepeval_hallucination_score_mean": deepeval_row.get("hallucination_score_mean"),
+                "deepeval_pass_rate": deepeval_row.get("pass_rate"),
+                "deepeval_judge_model": deepeval_row.get("judge_model"),
+                "deepeval_threshold": deepeval_row.get("threshold"),
+            }
+        )
+    return out_rows
 
 
 def _grounded_eval_args(
@@ -412,45 +484,13 @@ def _loss_args(args: argparse.Namespace) -> SimpleNamespace:
         base_model=args.base_model,
         lora_ckpt_path=args.lora_ckpt_path,
         lora_ckpt_list_path=args.lora_ckpt_list_path,
-        include_base=True,
+        include_base=False,
         batch_size=args.structured_batch_size,
         max_length=args.max_length,
         eval_track="sft_structured",
         eval_variant="checkpoint",
         out_csv="",
         details_out=None,
-    )
-
-
-def _build_report_markdown(
-    *,
-    selection: Dict[str, Any],
-    validation_curve_path: str,
-    merged_curve_path: str,
-    test_artifacts: Dict[str, str],
-) -> str:
-    selected = selection["selected_model_path"]
-    metrics = selection["selection_metrics"]
-    return "\n".join(
-        [
-            "# SFT Evaluation Report",
-            "",
-            "## Selected Checkpoint",
-            f"- Path: `{selected}`",
-            f"- Constraint satisfied: `{selection['constraint_satisfied']}`",
-            f"- correctness_reviewed_rate: `{metrics.get('correctness_reviewed_rate')}`",
-            f"- answerability_accuracy: `{metrics.get('answerability_accuracy')}`",
-            f"- semantic_yes_rate: `{metrics.get('semantic_yes_rate')}`",
-            f"- mean_loss: `{metrics.get('mean_loss')}`",
-            "",
-            "## Validation Artifacts",
-            f"- Structured curve: `{validation_curve_path}`",
-            f"- Merged comparison curve: `{merged_curve_path}`",
-            "",
-            "## Test Artifacts",
-            *[f"- {name}: `{path}`" for name, path in sorted(test_artifacts.items())],
-            "",
-        ]
     )
 
 
@@ -477,7 +517,7 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
             base_model=args.base_model,
             lora_ckpt_path=args.lora_ckpt_path,
             lora_ckpt_list_path=args.lora_ckpt_list_path,
-            include_base=True,
+            include_base=False,
             max_new_tokens=args.structured_max_new_tokens,
             prompt_mode="infer",
             eval_track="sft_structured",
@@ -509,6 +549,14 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
     selection = _select_best_checkpoint(eval_rows=sft_val_curve, loss_rows=loss_rows, args=args)
     selection_path = report_dir / "selection.json"
     write_json(str(selection_path), selection)
+    validation_summary_path = report_dir / "validation_summary.csv"
+    validation_summary_rows = _build_validation_summary_rows(
+        eval_rows=sft_val_curve,
+        loss_rows=loss_rows,
+        selection=selection,
+        args=args,
+    )
+    write_csv(validation_summary_rows, str(validation_summary_path))
 
     best_ckpt_path = str(selection["selected_model_path"])
     test_artifacts: Dict[str, str] = {}
@@ -561,6 +609,8 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
     _write_csv_and_jsonl(csv_path=test_dir / "best_ckpt_structured_deepeval_curve.csv", csv_rows=best_test_deepeval, jsonl_path=test_dir / "best_ckpt_structured_deepeval_details.jsonl", jsonl_rows=best_test_deepeval_details)
     test_artifacts["best_ckpt_structured_curve"] = str(test_dir / "best_ckpt_structured_curve.csv")
     test_artifacts["best_ckpt_structured_deepeval"] = str(test_dir / "best_ckpt_structured_deepeval_curve.csv")
+    test_summary_source_rows: List[Dict[str, Any]] = list(best_test_curve)
+    test_summary_deepeval_rows: List[Dict[str, Any]] = list(best_test_deepeval)
 
     base_protocol_test_generations = run_structured_generation(
         _structured_generation_args(
@@ -610,7 +660,8 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
     _write_csv_and_jsonl(csv_path=test_dir / "base_protocol_deepeval_curve.csv", csv_rows=base_protocol_test_deepeval, jsonl_path=test_dir / "base_protocol_deepeval_details.jsonl", jsonl_rows=base_protocol_test_deepeval_details)
     test_artifacts["base_protocol_curve"] = str(test_dir / "base_protocol_curve.csv")
     test_artifacts["base_protocol_deepeval"] = str(test_dir / "base_protocol_deepeval_curve.csv")
-    base_protocol_curve_path = test_dir / "base_protocol_curve.csv"
+    test_summary_source_rows.extend(base_protocol_test_curve)
+    test_summary_deepeval_rows.extend(base_protocol_test_deepeval)
 
     for enable_thinking, eval_variant, max_tokens in (
         (False, "no_think", args.base_task_max_new_tokens),
@@ -657,39 +708,28 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
         _write_csv_and_jsonl(csv_path=test_dir / f"base_task_{eval_variant}_deepeval_curve.csv", csv_rows=task_deepeval, jsonl_path=test_dir / f"base_task_{eval_variant}_deepeval_details.jsonl", jsonl_rows=task_deepeval_details)
         test_artifacts[f"base_task_{eval_variant}_curve"] = str(test_dir / f"base_task_{eval_variant}_curve.csv")
         test_artifacts[f"base_task_{eval_variant}_deepeval"] = str(test_dir / f"base_task_{eval_variant}_deepeval_curve.csv")
+        test_summary_source_rows.extend(task_curve)
+        test_summary_deepeval_rows.extend(task_deepeval)
 
-    merged_curve_path = report_dir / "merged_curve.csv"
-    merged_rows = merge_curve_rows(
-        SimpleNamespace(
-            sft_structured_csv=str(sft_val_curve_path),
-            base_protocol_csv=str(base_protocol_curve_path),
-            base_task_think_csv=str(test_dir / "base_task_think_curve.csv"),
-            base_task_nothink_csv=str(test_dir / "base_task_no_think_curve.csv"),
-            out_csv=str(merged_curve_path),
-        )
+    test_summary_path = report_dir / "test_summary.csv"
+    test_summary_rows = _build_test_summary_rows(
+        track_rows=test_summary_source_rows,
+        deepeval_rows=test_summary_deepeval_rows,
     )
-    write_csv(merged_rows, str(merged_curve_path))
-
-    final_report_path = report_dir / "final_report.md"
-    _write_markdown(
-        final_report_path,
-        _build_report_markdown(
-            selection=selection,
-            validation_curve_path=str(sft_val_curve_path),
-            merged_curve_path=str(merged_curve_path),
-            test_artifacts=test_artifacts,
-        ),
-    )
+    write_csv(test_summary_rows, str(test_summary_path))
 
     manifest = {
         "validation": {
             "loss_curve": str(loss_curve_path),
             "structured_curve": str(sft_val_curve_path),
-            "merged_curve": str(merged_curve_path),
+            "summary_csv": str(validation_summary_path),
         },
         "selection": selection,
+        "report": {
+            "validation_summary_csv": str(validation_summary_path),
+            "test_summary_csv": str(test_summary_path),
+        },
         "test_artifacts": test_artifacts,
-        "final_report": str(final_report_path),
     }
     write_json(str(report_dir / "manifest.json"), manifest)
     return manifest

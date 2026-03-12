@@ -40,7 +40,7 @@ The standard execution order is:
 7. SFT record building
 8. SFT dataset preparation
 9. SFT training
-10. Validation-time checkpoint selection and final evaluation report
+10. Validation-time checkpoint selection and final evaluation summaries
 
 Validation is used only for SFT checkpoint selection. Baseline comparisons are generated and evaluated only on the test split.
 
@@ -139,6 +139,11 @@ python -m model_eval.run_sft_eval_report \
   --out_dir outputs/model_eval/final_report
 ```
 
+This workflow writes two final summary CSV files:
+
+- `outputs/model_eval/final_report/report/validation_summary.csv` for checkpoint selection on the validation split
+- `outputs/model_eval/final_report/report/test_summary.csv` for final test-time comparison across the best checkpoint and the three baselines
+
 ## Optional Calibration
 
 Calibration is optional. The repository already ships default judge settings, but you can recalibrate the task-level NLI and answer-equivalence judges against human annotations when needed.
@@ -156,13 +161,14 @@ The package name is `calibrate`. The previous `cablibrate` spelling was a typo a
 
 - `nli_structured`: use `eval_grounded_qa` details, for example `outputs/model_eval/final_report/validation/sft_val_structured_details.jsonl`
 - `nli_flat` and `matcher`: use `eval_task_content_baseline` details, for example `outputs/model_eval/final_report/test/base_task_think_details.jsonl`
-- If you want to calibrate multiple task types together, merge the relevant detail files into one JSONL first and then build one mixed annotation pack
+- If you want to calibrate multiple sources together, repeat `--data_path` and the builder will sample from the combined pool
 
 ### Build an Annotation Pack
 
 ```bash
 python -m calibrate.build_annotation_pack \
   --data_path outputs/model_eval/final_report/validation/sft_val_structured_details.jsonl \
+  --data_path outputs/model_eval/final_report/test/base_protocol_details.jsonl \
   --task_types nli_structured \
   --out_jsonl outputs/calibration/annotation_pack_structured.jsonl \
   --metrics_out outputs/calibration/annotation_pack_structured_metrics.json
@@ -171,6 +177,7 @@ python -m calibrate.build_annotation_pack \
 ```bash
 python -m calibrate.build_annotation_pack \
   --data_path outputs/model_eval/final_report/test/base_task_think_details.jsonl \
+  --data_path outputs/model_eval/final_report/test/base_task_no_think_details.jsonl \
   --task_types nli_flat,matcher \
   --out_jsonl outputs/calibration/annotation_pack_flat_matcher.jsonl \
   --metrics_out outputs/calibration/annotation_pack_flat_matcher_metrics.json
@@ -217,4 +224,4 @@ Outputs:
 
 - The default target training model and tokenizer are centrally managed in `src/project_config/settings.py`.
 - Token usage accounting is available in `llm_textgen` and can be enabled by generation callers when comparing test-time cost.
-- The main validation/test report workflow writes structured evaluation curves, confidence analysis, and DeepEval outputs into one report directory.
+- The main validation/test report workflow writes per-stage details plus `validation_summary.csv` and `test_summary.csv` into one report directory.

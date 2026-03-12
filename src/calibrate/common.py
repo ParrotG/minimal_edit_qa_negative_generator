@@ -437,6 +437,7 @@ def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: in
     model_tag = str(row.get("model_tag") or "model")
     model_step = safe_int(row.get("model_step"), 0)
     model_path = str(row.get("model_path") or model_tag)
+    input_source_path = str(row.get("input_source_path") or "").strip()
     return ({
         "task_type": task_type,
         "pack_id": pack_id,
@@ -445,6 +446,7 @@ def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: in
         "model_tag": model_tag,
         "model_step": model_step,
         "model_path": model_path,
+        "input_source_path": input_source_path,
         "question": question,
         "knowledge": knowledge,
         "reference_answer": reference_answer,
@@ -475,6 +477,17 @@ def build_annotation_pack_rows(
         "pack_id": pack_id,
         "num_input_rows": len(rows),
         "tasks": {},
+        "input_sources": {
+            str(row.get("input_source_path") or "<unknown>"): {
+                "num_input_rows": sum(
+                    1
+                    for candidate in rows
+                    if str(candidate.get("input_source_path") or "<unknown>") == str(row.get("input_source_path") or "<unknown>")
+                ),
+                "tasks": {},
+            }
+            for row in rows
+        },
     }
 
     for task_type in task_types:
@@ -484,19 +497,36 @@ def build_annotation_pack_rows(
         skipped_refusal_or_unanswerable = 0
         skipped_matcher_not_applicable = 0
         for idx, row in enumerate(shuffled_rows):
+            source_key = str(row.get("input_source_path") or "<unknown>")
+            source_metrics = metrics["input_sources"][source_key]
+            source_task_metrics = source_metrics["tasks"].setdefault(
+                task_type,
+                {
+                    "num_kept": 0,
+                    "num_skipped_missing_fields": 0,
+                    "num_skipped_missing_eval_state": 0,
+                    "num_skipped_refusal_or_unanswerable": 0,
+                    "num_skipped_matcher_not_applicable": 0,
+                },
+            )
             pack_row, skipped_reason = build_pack_row(row=row, task_type=task_type, pack_id=pack_id, idx=idx)
             if pack_row is None:
                 if skipped_reason == "missing_eval_state":
                     skipped_missing_eval_state += 1
+                    source_task_metrics["num_skipped_missing_eval_state"] += 1
                 elif skipped_reason == "refusal_or_unanswerable":
                     skipped_refusal_or_unanswerable += 1
+                    source_task_metrics["num_skipped_refusal_or_unanswerable"] += 1
                 elif skipped_reason == "matcher_not_applicable":
                     skipped_matcher_not_applicable += 1
+                    source_task_metrics["num_skipped_matcher_not_applicable"] += 1
                 else:
                     skipped_missing += 1
+                    source_task_metrics["num_skipped_missing_fields"] += 1
                 continue
             out_rows.append(pack_row)
             kept += 1
+            source_task_metrics["num_kept"] += 1
             if max_samples_per_task > 0 and kept >= max_samples_per_task:
                 break
         metrics["tasks"][task_type] = {
