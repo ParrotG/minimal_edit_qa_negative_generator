@@ -9,7 +9,7 @@ The project is designed for research on grounded factuality under explicit evide
 - `src/grounded_qa`: source construction, teacher generation/validation, and SFT-record packing
 - `src/sft_trainer`: dataset preparation and SFT training
 - `src/model_eval`: validation/test generation, grounded evaluation, DeepEval, and report orchestration
-- `src/cablibrate`: optional calibration utilities for NLI and qa-metrics agreement analysis
+- `src/calibrate`: optional calibration utilities for NLI and qa-metrics agreement analysis
 - `src/qa_protocol`, `src/qa_checks`, `src/qa_judge`, `src/qa_data`: shared protocol, checking, judging, and data helpers
 - `src/llm_textgen`: local and API-based text generation
 - `src/project_config`: centralized default settings for models, tokenizers, APIs, and calibration
@@ -41,6 +41,8 @@ The standard execution order is:
 8. SFT dataset preparation
 9. SFT training
 10. Validation-time checkpoint selection and final evaluation report
+
+Validation is used only for SFT checkpoint selection. Baseline comparisons are generated and evaluated only on the test split.
 
 ## Minimal Usage
 
@@ -139,32 +141,77 @@ python -m model_eval.run_sft_eval_report \
 
 ## Optional Calibration
 
-Calibration is optional. The repository already ships default judge settings, but you can build a manual annotation pack and compare model judgments against human labels when recalibration is needed.
+Calibration is optional. The repository already ships default judge settings, but you can recalibrate the task-level NLI and answer-equivalence judges against human annotations when needed.
 
-### Build a Manual Annotation Pack
+The formal calibration workflow is:
+
+1. Build an annotation pack from evaluation detail files
+2. Manually fill `human_label` and optional `human_notes`
+3. Evaluate the labeled pack with the judge models
+4. Inspect `best_params.json` and `summary.csv`
+
+The package name is `calibrate`. The previous `cablibrate` spelling was a typo and is no longer the public entry point.
+
+### Recommended Inputs
+
+- `nli_structured`: use `eval_grounded_qa` details, for example `outputs/model_eval/final_report/validation/sft_val_structured_details.jsonl`
+- `nli_flat` and `matcher`: use `eval_task_content_baseline` details, for example `outputs/model_eval/final_report/test/base_task_think_details.jsonl`
+- If you want to calibrate multiple task types together, merge the relevant detail files into one JSONL first and then build one mixed annotation pack
+
+### Build an Annotation Pack
 
 ```bash
-python -m cablibrate.build_annotation_pack \
-  --data_path outputs/model_eval/sft_val_structured_details.jsonl \
-  --out_jsonl outputs/calibration/annotation_pack.jsonl \
-  --metrics_out outputs/calibration/annotation_pack_metrics.json
+python -m calibrate.build_annotation_pack \
+  --data_path outputs/model_eval/final_report/validation/sft_val_structured_details.jsonl \
+  --task_types nli_structured \
+  --out_jsonl outputs/calibration/annotation_pack_structured.jsonl \
+  --metrics_out outputs/calibration/annotation_pack_structured_metrics.json
 ```
-
-### Evaluate Human-Annotated Calibration Data
 
 ```bash
-python -m cablibrate.evaluate_annotation_pack \
-  --data_path outputs/calibration/annotation_pack_labeled.jsonl \
-  --out_jsonl outputs/calibration/scored_rows.jsonl \
-  --summary_csv outputs/calibration/summary.csv \
-  --best_out outputs/calibration/best_params.json
+python -m calibrate.build_annotation_pack \
+  --data_path outputs/model_eval/final_report/test/base_task_think_details.jsonl \
+  --task_types nli_flat,matcher \
+  --out_jsonl outputs/calibration/annotation_pack_flat_matcher.jsonl \
+  --metrics_out outputs/calibration/annotation_pack_flat_matcher_metrics.json
 ```
 
-The annotation pack supports three task types:
+Each annotation row contains the model-facing fields plus two human fields:
 
-- `nli_flat`: `knowledge + question + answer`
-- `nli_structured`: `evidence + question + rationale + answer`
-- `matcher`: human-readable `knowledge + question + reference_answer + answer`, with matcher scoring based on `question + reference_answer + answer`
+- `human_label`: binary manual judgment
+- `human_notes`: optional free-form notes
+
+### Evaluate a Human-Annotated Pack
+
+```bash
+python -m calibrate.evaluate_annotation_pack \
+  --data_path outputs/calibration/annotation_pack_structured_labeled.jsonl \
+  --out_jsonl outputs/calibration/scored_rows_structured.jsonl \
+  --summary_csv outputs/calibration/summary_structured.csv \
+  --summary_json outputs/calibration/summary_structured.json \
+  --best_out outputs/calibration/best_params_structured.json
+```
+
+```bash
+python -m calibrate.evaluate_annotation_pack \
+  --data_path outputs/calibration/annotation_pack_flat_matcher_labeled.jsonl \
+  --out_jsonl outputs/calibration/scored_rows_flat_matcher.jsonl \
+  --summary_csv outputs/calibration/summary_flat_matcher.csv \
+  --summary_json outputs/calibration/summary_flat_matcher.json \
+  --best_out outputs/calibration/best_params_flat_matcher.json
+```
+
+Default calibration behavior:
+
+- calibration is aggregated by `task_type`, not by checkpoint
+- the default search objective is `f1`
+- `model_tag`, `model_step`, and `model_path` are retained only for traceability
+
+Outputs:
+
+- `scored_rows.jsonl`: per-row model scores, predictions, and human labels
+- `summary.csv/json`: per-task search results, including `accuracy`, `f1`, `precision`, `recall`, `cohen_kappa`, `coverage`, `num_rows`, and `num_labeled`
+- `best_params.json`: one best parameter row for each task type
 
 ## Notes
 

@@ -344,6 +344,101 @@ def extract_structured_output_text(row: Dict[str, Any]) -> Tuple[str, Dict[str, 
     return text, meta
 
 
+def extract_structured_payload(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return a structured payload dict from parsed_output or raw_output when available."""
+
+    parsed_output = row.get("parsed_output")
+    if isinstance(parsed_output, dict):
+        return dict(parsed_output)
+
+    raw_output = pick_first_non_empty_str(row, ["raw_output", "answer", "actual_output"])
+    if not raw_output:
+        return None
+    parse_result = parse_structured_output(raw_output)
+    if not parse_result.ok or parse_result.parsed is None:
+        return None
+    return parse_result.parsed.model_dump(mode="json")
+
+
+def is_flat_answerable_for_content_eval(row: Dict[str, Any]) -> bool:
+    """Return whether a flat-baseline row should enter correctness and semantic evaluation."""
+
+    if not bool(row.get("extraction_parse_ok")):
+        return False
+    if row.get("refusal_detected") is not False:
+        return False
+    if not optional_stripped(row.get("extracted_answer")):
+        return False
+    pred_answerability = optional_stripped(row.get("pred_answerability"))
+    if pred_answerability and pred_answerability != "answerable":
+        return False
+    return True
+
+
+def flat_content_eval_skipped_reason(row: Dict[str, Any]) -> str:
+    """Explain why a flat-baseline row does not enter correctness and semantic evaluation."""
+
+    if not bool(row.get("extraction_parse_ok")):
+        return "extraction_parse_failed"
+    if row.get("refusal_detected") is True:
+        return "predicted_refusal"
+    if row.get("refusal_detected") is None:
+        return "missing_refusal_signal"
+    if not optional_stripped(row.get("extracted_answer")):
+        return "empty_extracted_answer"
+    pred_answerability = optional_stripped(row.get("pred_answerability"))
+    if pred_answerability and pred_answerability != "answerable":
+        return "predicted_unanswerable"
+    return ""
+
+
+def is_flat_matcher_applicable(row: Dict[str, Any]) -> bool:
+    """Return whether a flat-baseline row is eligible for matcher review."""
+
+    if not is_flat_answerable_for_content_eval(row):
+        return False
+    if not optional_stripped(row.get("reference_answer")):
+        return False
+    correctness_ok = row.get("correctness_ok")
+    if correctness_ok is not None and bool(correctness_ok):
+        return False
+    return True
+
+
+def is_structured_answerable_for_semantic_eval(row: Dict[str, Any]) -> bool:
+    """Return whether a structured row should enter semantic evaluation."""
+
+    payload = extract_structured_payload(row)
+    if not payload:
+        return False
+    if optional_stripped(payload.get("answerability")) != "answerable":
+        return False
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return False
+    has_quote = any(optional_stripped(item.get("quote")) for item in evidence if isinstance(item, dict))
+    if not has_quote:
+        return False
+    if not optional_stripped(payload.get("rationale")):
+        return False
+    if not optional_stripped(payload.get("answer")):
+        return False
+    return True
+
+
+def is_structured_matcher_applicable(row: Dict[str, Any]) -> bool:
+    """Return whether a structured row is eligible for matcher review."""
+
+    if not is_structured_answerable_for_semantic_eval(row):
+        return False
+    if not _extract_reference_answer(row):
+        return False
+    correctness_ok = row.get("correctness_ok")
+    if correctness_ok is not None and bool(correctness_ok):
+        return False
+    return True
+
+
 def normalize_generated_row(
     row: Dict[str, Any],
     idx: int,

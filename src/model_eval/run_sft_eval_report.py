@@ -31,16 +31,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test_data_path", type=str, required=True, help="Test dataset path.")
     parser.add_argument("--validation_split", type=str, default="validation")
     parser.add_argument("--test_split", type=str, default="test")
-    parser.add_argument("--validation_max_samples", type=int, default=-1)
-    parser.add_argument("--test_max_samples", type=int, default=-1)
+    parser.add_argument("--validation_max_samples", type=int, default=200)
+    parser.add_argument("--test_max_samples", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--base_model", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
     parser.add_argument("--lora_ckpt_path", type=str, default=None)
     parser.add_argument("--lora_ckpt_list_path", type=str, default=None)
     parser.add_argument("--out_dir", type=str, required=True)
 
-    parser.add_argument("--structured_batch_size", type=int, default=4)
-    parser.add_argument("--task_batch_size", type=int, default=4)
+    parser.add_argument("--structured_batch_size", type=int, default=16)
+    parser.add_argument("--task_batch_size", type=int, default=16)
     parser.add_argument("--max_length", type=int, default=1024)
     parser.add_argument("--structured_max_new_tokens", type=int, default=512)
     parser.add_argument("--base_protocol_max_new_tokens", type=int, default=512)
@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--deepeval_judge_model", type=str, default="gpt-5.2")
     parser.add_argument("--deepeval_threshold", type=float, default=0.5)
     parser.add_argument("--deepeval_max_concurrent", type=int, default=4)
-    parser.add_argument("--deepeval_throttle_value", type=float, default=3.0)
+    parser.add_argument("--deepeval_throttle_value", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -510,106 +510,6 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
     selection_path = report_dir / "selection.json"
     write_json(str(selection_path), selection)
 
-    base_protocol_generations = run_structured_generation(
-        _structured_generation_args(
-            data_path=args.validation_data_path,
-            split=args.validation_split,
-            max_samples=args.validation_max_samples,
-            base_model=args.base_model,
-            lora_ckpt_path=None,
-            lora_ckpt_list_path=None,
-            include_base=True,
-            max_new_tokens=args.base_protocol_max_new_tokens,
-            prompt_mode="teacher_fewshot",
-            eval_track="base_protocol",
-            eval_variant="fewshot_retry",
-            args=args,
-        )
-    )
-    base_protocol_generation_path = validation_dir / "base_protocol_generations.jsonl"
-    write_jsonl(str(base_protocol_generation_path), base_protocol_generations)
-    base_protocol_curve, base_protocol_details, base_protocol_confidence = run_grounded_qa_evaluation(
-        _grounded_eval_args(
-            generated_path=str(base_protocol_generation_path),
-            split="train",
-            max_samples=-1,
-            seed=args.seed,
-            metrics_out=str(validation_dir / "base_protocol_curve.csv"),
-            details_out=str(validation_dir / "base_protocol_details.jsonl"),
-            confidence_out=str(validation_dir / "base_protocol_confidence.json"),
-            args=args,
-        )
-    )
-    base_protocol_curve_path = validation_dir / "base_protocol_curve.csv"
-    _write_csv_and_jsonl(csv_path=base_protocol_curve_path, csv_rows=base_protocol_curve, jsonl_path=validation_dir / "base_protocol_details.jsonl", jsonl_rows=base_protocol_details)
-    write_json(str(validation_dir / "base_protocol_confidence.json"), {"models": base_protocol_confidence})
-
-    base_task_nothink_generations = run_answer_generation(
-        _task_generation_args(
-            data_path=args.validation_data_path,
-            split=args.validation_split,
-            max_samples=args.validation_max_samples,
-            max_new_tokens=args.base_task_max_new_tokens,
-            enable_thinking=False,
-            eval_variant="no_think",
-            args=args,
-        )
-    )
-    base_task_nothink_generation_path = validation_dir / "base_task_nothink_generations.jsonl"
-    write_jsonl(str(base_task_nothink_generation_path), base_task_nothink_generations)
-    base_task_nothink_curve, base_task_nothink_details = run_task_content_baseline(
-        _task_eval_args(
-            generated_path=str(base_task_nothink_generation_path),
-            split="train",
-            max_samples=-1,
-            seed=args.seed,
-            metrics_out=str(validation_dir / "base_task_nothink_curve.csv"),
-            details_out=str(validation_dir / "base_task_nothink_details.jsonl"),
-            args=args,
-        )
-    )
-    base_task_nothink_curve_path = validation_dir / "base_task_nothink_curve.csv"
-    _write_csv_and_jsonl(csv_path=base_task_nothink_curve_path, csv_rows=base_task_nothink_curve, jsonl_path=validation_dir / "base_task_nothink_details.jsonl", jsonl_rows=base_task_nothink_details)
-
-    base_task_think_generations = run_answer_generation(
-        _task_generation_args(
-            data_path=args.validation_data_path,
-            split=args.validation_split,
-            max_samples=args.validation_max_samples,
-            max_new_tokens=args.base_task_think_max_new_tokens,
-            enable_thinking=True,
-            eval_variant="think",
-            args=args,
-        )
-    )
-    base_task_think_generation_path = validation_dir / "base_task_think_generations.jsonl"
-    write_jsonl(str(base_task_think_generation_path), base_task_think_generations)
-    base_task_think_curve, base_task_think_details = run_task_content_baseline(
-        _task_eval_args(
-            generated_path=str(base_task_think_generation_path),
-            split="train",
-            max_samples=-1,
-            seed=args.seed,
-            metrics_out=str(validation_dir / "base_task_think_curve.csv"),
-            details_out=str(validation_dir / "base_task_think_details.jsonl"),
-            args=args,
-        )
-    )
-    base_task_think_curve_path = validation_dir / "base_task_think_curve.csv"
-    _write_csv_and_jsonl(csv_path=base_task_think_curve_path, csv_rows=base_task_think_curve, jsonl_path=validation_dir / "base_task_think_details.jsonl", jsonl_rows=base_task_think_details)
-
-    merged_curve_path = report_dir / "merged_curve.csv"
-    merged_rows = merge_curve_rows(
-        SimpleNamespace(
-            sft_structured_csv=str(sft_val_curve_path),
-            base_protocol_csv=str(base_protocol_curve_path),
-            base_task_think_csv=str(base_task_think_curve_path),
-            base_task_nothink_csv=str(base_task_nothink_curve_path),
-            out_csv=str(merged_curve_path),
-        )
-    )
-    write_csv(merged_rows, str(merged_curve_path))
-
     best_ckpt_path = str(selection["selected_model_path"])
     test_artifacts: Dict[str, str] = {}
 
@@ -710,6 +610,7 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
     _write_csv_and_jsonl(csv_path=test_dir / "base_protocol_deepeval_curve.csv", csv_rows=base_protocol_test_deepeval, jsonl_path=test_dir / "base_protocol_deepeval_details.jsonl", jsonl_rows=base_protocol_test_deepeval_details)
     test_artifacts["base_protocol_curve"] = str(test_dir / "base_protocol_curve.csv")
     test_artifacts["base_protocol_deepeval"] = str(test_dir / "base_protocol_deepeval_curve.csv")
+    base_protocol_curve_path = test_dir / "base_protocol_curve.csv"
 
     for enable_thinking, eval_variant, max_tokens in (
         (False, "no_think", args.base_task_max_new_tokens),
@@ -756,6 +657,18 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
         _write_csv_and_jsonl(csv_path=test_dir / f"base_task_{eval_variant}_deepeval_curve.csv", csv_rows=task_deepeval, jsonl_path=test_dir / f"base_task_{eval_variant}_deepeval_details.jsonl", jsonl_rows=task_deepeval_details)
         test_artifacts[f"base_task_{eval_variant}_curve"] = str(test_dir / f"base_task_{eval_variant}_curve.csv")
         test_artifacts[f"base_task_{eval_variant}_deepeval"] = str(test_dir / f"base_task_{eval_variant}_deepeval_curve.csv")
+
+    merged_curve_path = report_dir / "merged_curve.csv"
+    merged_rows = merge_curve_rows(
+        SimpleNamespace(
+            sft_structured_csv=str(sft_val_curve_path),
+            base_protocol_csv=str(base_protocol_curve_path),
+            base_task_think_csv=str(test_dir / "base_task_think_curve.csv"),
+            base_task_nothink_csv=str(test_dir / "base_task_no_think_curve.csv"),
+            out_csv=str(merged_curve_path),
+        )
+    )
+    write_csv(merged_rows, str(merged_curve_path))
 
     final_report_path = report_dir / "final_report.md"
     _write_markdown(

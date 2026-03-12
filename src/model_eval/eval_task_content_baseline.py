@@ -12,7 +12,13 @@ from qa_judge.judge import AnswerJudge
 from qa_judge.nli import NLIVerifier
 
 from .answer_extraction import AnswerExtractionConfig, extract_answers_with_llm
-from .common import group_rows_by_model, load_generated_rows, write_csv
+from .common import (
+    flat_content_eval_skipped_reason,
+    group_rows_by_model,
+    is_flat_answerable_for_content_eval,
+    load_generated_rows,
+    write_csv,
+)
 from .correctness_transformer_matcher import (
     AnswerEquivalenceTransformerMatcher,
     TransformerMatcherConfig,
@@ -142,6 +148,9 @@ def _evaluate_model_rows(
             "refusal_detected_rate": float("nan"),
             "answerability_total": 0,
             "answerability_accuracy": float("nan"),
+            "content_eval_total": 0,
+            "content_eval_rate": float("nan"),
+            "num_refusal_or_unanswerable_skipped": 0,
             "correctness_total": 0,
             "correctness_strict_rate": float("nan"),
             "correctness_matcher_review_total": 0,
@@ -164,6 +173,8 @@ def _evaluate_model_rows(
     refusal_detected_count = 0
     answerability_total = 0
     answerability_correct = 0
+    content_eval_total = 0
+    refusal_or_unanswerable_skipped = 0
     correctness_total = 0
     correctness_strict_ok = 0
 
@@ -183,8 +194,18 @@ def _evaluate_model_rows(
                 answerability_correct += int(pred_label == gold_label)
 
         extracted_answer = str(row.get("extracted_answer") or "").strip()
+        gate_row = {
+            **row,
+            "pred_answerability": pred_label,
+        }
+        entered_content_eval = is_flat_answerable_for_content_eval(gate_row)
+        skipped_reason = "" if entered_content_eval else flat_content_eval_skipped_reason(gate_row)
+        if entered_content_eval:
+            content_eval_total += 1
+        elif skipped_reason in {"predicted_refusal", "predicted_unanswerable"}:
+            refusal_or_unanswerable_skipped += 1
         strict_report = None
-        if pred_label == "answerable" and extracted_answer and str(row.get("reference_answer") or "").strip():
+        if entered_content_eval and str(row.get("reference_answer") or "").strip():
             correctness_total += 1
             strict_report = check_answer_correctness(
                 answer=extracted_answer,
@@ -201,7 +222,7 @@ def _evaluate_model_rows(
                     }
                 )
                 matcher_indices.append(idx)
-        if pred_label == "answerable" and extracted_answer:
+        if entered_content_eval:
             judge_inputs.append(
                 {
                     "knowledge": str(row.get("knowledge") or ""),
@@ -221,6 +242,8 @@ def _evaluate_model_rows(
                 "judge_payload": None,
                 "semantic_decision": None,
                 "semantic_margin": None,
+                "entered_content_eval": entered_content_eval,
+                "content_eval_skipped_reason": skipped_reason,
             }
         )
 
@@ -291,6 +314,8 @@ def _evaluate_model_rows(
                 "extracted_answer": row.get("extracted_answer"),
                 "refusal_detected": row.get("refusal_detected"),
                 "refusal_reason": row.get("refusal_reason"),
+                "entered_content_eval": bool(row.get("entered_content_eval")),
+                "content_eval_skipped_reason": row.get("content_eval_skipped_reason"),
                 "correctness_ok": None if strict_report is None else strict_report.ok,
                 "correctness_exact_match": None if strict_report is None else strict_report.exact_match,
                 "correctness_token_f1": None if strict_report is None else strict_report.token_f1,
@@ -310,6 +335,9 @@ def _evaluate_model_rows(
         "answerability_total": answerability_total,
         "answerability_correct": answerability_correct,
         "answerability_accuracy": _safe_rate(answerability_correct, answerability_total),
+        "content_eval_total": content_eval_total,
+        "content_eval_rate": _safe_rate(content_eval_total, len(rows)),
+        "num_refusal_or_unanswerable_skipped": refusal_or_unanswerable_skipped,
         "correctness_total": correctness_total,
         "correctness_strict_ok": correctness_strict_ok,
         "correctness_strict_rate": _safe_rate(correctness_strict_ok, correctness_total),

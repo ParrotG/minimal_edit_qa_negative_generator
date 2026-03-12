@@ -17,7 +17,7 @@ from model_eval.correctness_transformer_matcher import (
 from .common import (
     binary_stats,
     build_values,
-    group_rows_by_task_and_model,
+    group_rows,
     iter_grid,
     load_annotation_rows,
     write_csv,
@@ -30,7 +30,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", type=str, default="train", help="Split name when data_path is a DatasetDict.")
     parser.add_argument("--max_samples", type=int, default=-1, help="Maximum rows to evaluate. -1 means all.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--fit_mode", type=str, default=PROJECT_SETTINGS.calibration.fit_mode, choices=["per_model", "global"])
+    parser.add_argument(
+        "--group_by",
+        type=str,
+        default=PROJECT_SETTINGS.calibration.group_by,
+        choices=["task", "task_and_model"],
+        help="Calibration aggregation granularity. Defaults to task-level calibration.",
+    )
     parser.add_argument(
         "--search_objective",
         type=str,
@@ -74,6 +80,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--summary_json", type=str, default="", help="Optional summary JSON output.")
     parser.add_argument("--best_out", type=str, required=True, help="Best-parameter JSON output.")
     return parser.parse_args()
+
+
+def _group_meta_from_key(group_key: Tuple[Any, ...], group_by: str) -> Dict[str, Any]:
+    """Build summary metadata for the requested grouping granularity."""
+
+    if group_by == "task":
+        return {
+            "task_type": str(group_key[0]),
+            "group_by": group_by,
+            "model_tag": None,
+            "model_step": None,
+            "model_path": None,
+        }
+    if group_by == "task_and_model":
+        return {
+            "task_type": str(group_key[0]),
+            "group_by": group_by,
+            "model_tag": str(group_key[1]),
+            "model_step": int(group_key[2]),
+            "model_path": str(group_key[3]),
+        }
+    raise ValueError(f"Unsupported calibration group_by: {group_by}")
 
 
 def _to_logit(prob: float, eps: float = 1e-12) -> float:
@@ -188,6 +216,31 @@ def _evaluate_predictions(
     }
 
 
+def _score_for_sort(value: Any) -> float:
+    """Convert a metric to a comparable float for descending sort."""
+
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return -float("inf")
+    if math.isnan(num):
+        return -float("inf")
+    return num
+
+
+def _select_best_search_row(rows: Sequence[Dict[str, Any]], objective: str) -> Dict[str, Any]:
+    """Pick the best calibration setting with deterministic tie-breaks."""
+
+    return max(
+        rows,
+        key=lambda row: (
+            _score_for_sort(row.get(objective)),
+            _score_for_sort(row.get("accuracy")),
+            _score_for_sort(row.get("coverage")),
+        ),
+    )
+
+
 def _method_argmax(rows: Sequence[Dict[str, Any]]) -> List[Optional[bool]]:
     return [str(row["nli_argmax_label_calib"]) == "entail" for row in rows]
 
@@ -279,17 +332,8 @@ def _search_nli_group(
             }
         )
 
-    minimize = False
-    best_row = max(search_rows, key=lambda row: (float(row.get(objective, float("-inf"))), float(row.get("coverage", float("-inf")))))
-    reject_candidates = [row for row in search_rows if "reject" in str(row.get("method") or "")]
-    if reject_candidates:
-        best_reject = min(
-            reject_candidates,
-            key=lambda row: (float(row.get("lagrangian_objective", float("inf"))), -float(row.get("coverage", float("-inf")))),
-        )
-        best_row = best_reject if math.isfinite(float(best_reject.get("lagrangian_objective", float("inf")))) else best_row
-        minimize = True
-    return search_rows, {**best_row, "best_sort_minimize": minimize}
+    best_row = _select_best_search_row(search_rows, objective=objective)
+    return search_rows, best_row
 
 
 def _search_matcher_group(
@@ -311,7 +355,7 @@ def _search_matcher_group(
                 **metrics,
             }
         )
-    best_row = max(search_rows, key=lambda row: (float(row.get(objective, float("-inf"))), float(row.get("accuracy", float("-inf")))))
+    best_row = _select_best_search_row(search_rows, objective=objective)
     return search_rows, best_row
 
 
@@ -361,26 +405,11 @@ def _score_matcher_rows(rows: Sequence[Dict[str, Any]], matcher: AnswerEquivalen
 def _fit_nli_temperatures(
     *,
     rows: Sequence[Dict[str, Any]],
-    fit_mode: str,
+    group_by: str,
     temperature_values: Sequence[float],
-) -> Dict[Tuple[str, str, int, str], Dict[str, float]]:
-    grouped = group_rows_by_task_and_model(rows)
-    fit_map: Dict[Tuple[str, str, int, str], Dict[str, float]] = {}
-    if fit_mode == "global":
-        task_groups: Dict[str, List[Dict[str, Any]]] = {}
-        for row in rows:
-            task_groups.setdefault(str(row.get("task_type") or ""), []).append(row)
-        global_fit = {
-            task_type: _fit_temperature(
-                [row for row in task_rows if row.get("human_label_bool") is not None],
-                temperature_values,
-            )
-            for task_type, task_rows in task_groups.items()
-        }
-        for key in grouped:
-            fit_map[key] = dict(global_fit.get(key[0]) or {"temperature": 1.0, "fit_nll": float("inf")})
-        return fit_map
-
+) -> Dict[Tuple[Any, ...], Dict[str, float]]:
+    grouped = group_rows(rows, group_by=group_by)
+    fit_map: Dict[Tuple[Any, ...], Dict[str, float]] = {}
     for key, group_rows in grouped.items():
         labeled_rows = [row for row in group_rows if row.get("human_label_bool") is not None]
         fit_map[key] = _fit_temperature(labeled_rows, temperature_values)
@@ -421,8 +450,8 @@ def main() -> None:
             v_step=args.temperature_step,
             name="temperature",
         )
-        fit_map = _fit_nli_temperatures(rows=scored_nli_rows, fit_mode=args.fit_mode, temperature_values=temperature_values)
-        grouped_nli_rows = group_rows_by_task_and_model(scored_nli_rows)
+        fit_map = _fit_nli_temperatures(rows=scored_nli_rows, group_by=args.group_by, temperature_values=temperature_values)
+        grouped_nli_rows = group_rows(scored_nli_rows, group_by=args.group_by)
         margin_thresholds = build_values(
             explicit=args.margin_threshold_values,
             v_min=args.margin_threshold_min,
@@ -449,10 +478,7 @@ def main() -> None:
             calibrated_rows = [_apply_temperature(row, float(fit_payload["temperature"])) for row in group_rows]
             scored_rows.extend(calibrated_rows)
             group_meta = {
-                "task_type": key[0],
-                "model_tag": key[1],
-                "model_step": key[2],
-                "model_path": key[3],
+                **_group_meta_from_key(key, args.group_by),
                 "temperature": float(fit_payload["temperature"]),
                 "fit_nll": float(fit_payload["fit_nll"]),
             }
@@ -474,7 +500,7 @@ def main() -> None:
         )
         scored_matcher_rows = _score_matcher_rows(matcher_rows, matcher)
         scored_rows.extend(scored_matcher_rows)
-        grouped_matcher_rows = group_rows_by_task_and_model(scored_matcher_rows)
+        grouped_matcher_rows = group_rows(scored_matcher_rows, group_by=args.group_by)
         matcher_thresholds = build_values(
             explicit=args.matcher_threshold_values,
             v_min=args.matcher_threshold_min,
@@ -483,12 +509,7 @@ def main() -> None:
             name="matcher_threshold",
         )
         for key, group_rows in grouped_matcher_rows.items():
-            group_meta = {
-                "task_type": key[0],
-                "model_tag": key[1],
-                "model_step": key[2],
-                "model_path": key[3],
-            }
+            group_meta = _group_meta_from_key(key, args.group_by)
             group_search_rows, best_row = _search_matcher_group(
                 rows=group_rows,
                 thresholds=matcher_thresholds,
@@ -500,7 +521,14 @@ def main() -> None:
 
     write_jsonl(args.out_jsonl, scored_rows)
     write_csv(summary_rows, args.summary_csv)
-    write_json(args.best_out, {"rows": best_rows})
+    write_json(
+        args.best_out,
+        {
+            "group_by": args.group_by,
+            "search_objective": args.search_objective,
+            "rows": best_rows,
+        },
+    )
     if str(args.summary_json or "").strip():
         write_json(
             args.summary_json,
@@ -509,6 +537,7 @@ def main() -> None:
                 "num_scored_rows": len(scored_rows),
                 "num_summary_rows": len(summary_rows),
                 "num_best_rows": len(best_rows),
+                "group_by": args.group_by,
                 "summary_rows": summary_rows,
                 "best_rows": best_rows,
             },

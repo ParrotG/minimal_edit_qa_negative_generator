@@ -10,12 +10,24 @@ from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 
 try:
     from src.dataio import read_jsonl_list
+    from src.model_eval.common import (
+        extract_structured_payload,
+        is_flat_answerable_for_content_eval,
+        is_flat_matcher_applicable,
+        is_structured_answerable_for_semantic_eval,
+        is_structured_matcher_applicable,
+    )
     from src.prompt import build_qa_premise
-    from src.qa_protocol import parse_structured_output
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
     from dataio import read_jsonl_list
+    from model_eval.common import (
+        extract_structured_payload,
+        is_flat_answerable_for_content_eval,
+        is_flat_matcher_applicable,
+        is_structured_answerable_for_semantic_eval,
+        is_structured_matcher_applicable,
+    )
     from prompt import build_qa_premise
-    from qa_protocol import parse_structured_output
 
 
 def normalize_list(value: Any) -> List[str]:
@@ -333,23 +345,10 @@ def _extract_reference_answer(row: Dict[str, Any]) -> str:
     return ""
 
 
-def _extract_structured_payload(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    parsed_output = row.get("parsed_output")
-    if isinstance(parsed_output, dict):
-        return dict(parsed_output)
-    raw_output = str(row.get("raw_output") or "").strip()
-    if not raw_output:
-        return None
-    parse_result = parse_structured_output(raw_output)
-    if not parse_result.ok or parse_result.parsed is None:
-        return None
-    return parse_result.parsed.model_dump(mode="json")
-
-
 def extract_final_answer_text(row: Dict[str, Any]) -> str:
     """Extract the final answer text from either structured or flat rows."""
 
-    structured = _extract_structured_payload(row)
+    structured = extract_structured_payload(row)
     if structured:
         return str(structured.get("answer") or "").strip()
     return _extract_answer(row, answer_field="answer")
@@ -358,7 +357,7 @@ def extract_final_answer_text(row: Dict[str, Any]) -> str:
 def extract_rationale_text(row: Dict[str, Any]) -> str:
     """Extract rationale text from a structured payload when available."""
 
-    structured = _extract_structured_payload(row)
+    structured = extract_structured_payload(row)
     if not structured:
         return ""
     return str(structured.get("rationale") or "").strip()
@@ -367,7 +366,7 @@ def extract_rationale_text(row: Dict[str, Any]) -> str:
 def extract_evidence_text(row: Dict[str, Any]) -> str:
     """Extract a human-readable evidence string from structured output."""
 
-    structured = _extract_structured_payload(row)
+    structured = extract_structured_payload(row)
     if not structured:
         return ""
     evidence = structured.get("evidence")
@@ -382,31 +381,54 @@ def extract_evidence_text(row: Dict[str, Any]) -> str:
     return "\n".join(quotes).strip()
 
 
-def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: int) -> Optional[Dict[str, Any]]:
+def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Build one annotation-pack row for a task type from a mixed evaluation row."""
 
     question = _extract_question(row, question_field="question")
     knowledge = _extract_knowledge(row, knowledge_field="knowledge", context_field="context")
-    answer = extract_final_answer_text(row)
     reference_answer = _extract_reference_answer(row)
     rationale = extract_rationale_text(row)
     evidence_text = extract_evidence_text(row)
+    structured_payload = extract_structured_payload(row)
+    has_eval_state = any(
+        key in row
+        for key in ("extraction_parse_ok", "refusal_detected", "extracted_answer", "pred_answerability", "correctness_ok")
+    )
+
+    answer = ""
 
     premise_text = ""
     hypothesis_text = ""
     if task_type == "nli_flat":
+        if not has_eval_state:
+            return None, "missing_eval_state"
+        if not is_flat_answerable_for_content_eval(row):
+            skipped = "refusal_or_unanswerable" if row.get("refusal_detected") is True or str(row.get("pred_answerability") or "") == "unanswerable" else "missing_fields"
+            return None, skipped
+        answer = str(row.get("extracted_answer") or "").strip()
         if not question or not knowledge or not answer:
-            return None
+            return None, "missing_fields"
         premise_text = build_qa_premise(knowledge=knowledge, question=question)
         hypothesis_text = answer
     elif task_type == "nli_structured":
+        if not is_structured_answerable_for_semantic_eval(row):
+            return None, "refusal_or_unanswerable"
+        answer = str((structured_payload or {}).get("answer") or "").strip()
         if not question or not evidence_text or not rationale or not answer:
-            return None
+            return None, "missing_fields"
         premise_text = build_qa_premise(knowledge=evidence_text, question=question)
         hypothesis_text = f"{rationale}\nTherefore the answer is {answer}"
     elif task_type == "matcher":
+        if not has_eval_state:
+            return None, "missing_eval_state"
+        if not is_flat_matcher_applicable(row) and not is_structured_matcher_applicable(row):
+            skipped = "matcher_not_applicable" if row.get("correctness_ok") is not None else "refusal_or_unanswerable"
+            return None, skipped
+        answer = str(row.get("extracted_answer") or "").strip() if has_eval_state else str((structured_payload or {}).get("answer") or "").strip()
+        if not answer:
+            answer = extract_final_answer_text(row)
         if not question or not knowledge or not reference_answer or not answer:
-            return None
+            return None, "missing_fields"
     else:
         raise ValueError(f"Unsupported task_type: {task_type}")
 
@@ -415,7 +437,7 @@ def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: in
     model_tag = str(row.get("model_tag") or "model")
     model_step = safe_int(row.get("model_step"), 0)
     model_path = str(row.get("model_path") or model_tag)
-    return {
+    return ({
         "task_type": task_type,
         "pack_id": pack_id,
         "sample_id": sample_id,
@@ -433,7 +455,7 @@ def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: in
         "hypothesis_text": hypothesis_text,
         "human_label": None,
         "human_notes": "",
-    }
+    }, None)
 
 
 def build_annotation_pack_rows(
@@ -458,10 +480,20 @@ def build_annotation_pack_rows(
     for task_type in task_types:
         kept = 0
         skipped_missing = 0
+        skipped_missing_eval_state = 0
+        skipped_refusal_or_unanswerable = 0
+        skipped_matcher_not_applicable = 0
         for idx, row in enumerate(shuffled_rows):
-            pack_row = build_pack_row(row=row, task_type=task_type, pack_id=pack_id, idx=idx)
+            pack_row, skipped_reason = build_pack_row(row=row, task_type=task_type, pack_id=pack_id, idx=idx)
             if pack_row is None:
-                skipped_missing += 1
+                if skipped_reason == "missing_eval_state":
+                    skipped_missing_eval_state += 1
+                elif skipped_reason == "refusal_or_unanswerable":
+                    skipped_refusal_or_unanswerable += 1
+                elif skipped_reason == "matcher_not_applicable":
+                    skipped_matcher_not_applicable += 1
+                else:
+                    skipped_missing += 1
                 continue
             out_rows.append(pack_row)
             kept += 1
@@ -470,6 +502,9 @@ def build_annotation_pack_rows(
         metrics["tasks"][task_type] = {
             "num_kept": kept,
             "num_skipped_missing_fields": skipped_missing,
+            "num_skipped_missing_eval_state": skipped_missing_eval_state,
+            "num_skipped_refusal_or_unanswerable": skipped_refusal_or_unanswerable,
+            "num_skipped_matcher_not_applicable": skipped_matcher_not_applicable,
         }
 
     return out_rows, metrics
@@ -498,6 +533,16 @@ def load_annotation_rows(data_path: str, split: str, seed: int, max_samples: int
     return rows
 
 
+def group_rows_by_task(rows: Sequence[Dict[str, Any]]) -> Dict[Tuple[str], List[Dict[str, Any]]]:
+    """Group rows by task type only."""
+
+    grouped: Dict[Tuple[str], List[Dict[str, Any]]] = {}
+    for row in rows:
+        key = (str(row.get("task_type") or ""),)
+        grouped.setdefault(key, []).append(dict(row))
+    return grouped
+
+
 def group_rows_by_task_and_model(rows: Sequence[Dict[str, Any]]) -> Dict[Tuple[str, str, int, str], List[Dict[str, Any]]]:
     """Group rows by task type and model identifiers."""
 
@@ -511,6 +556,20 @@ def group_rows_by_task_and_model(rows: Sequence[Dict[str, Any]]) -> Dict[Tuple[s
         )
         grouped.setdefault(key, []).append(dict(row))
     return grouped
+
+
+def group_rows(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    group_by: str,
+) -> Dict[Tuple[Any, ...], List[Dict[str, Any]]]:
+    """Group annotation rows according to the requested aggregation level."""
+
+    if group_by == "task":
+        return group_rows_by_task(rows)
+    if group_by == "task_and_model":
+        return group_rows_by_task_and_model(rows)
+    raise ValueError(f"Unsupported calibration group_by: {group_by}")
 
 
 def summarize_annotation_labels(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
