@@ -144,12 +144,12 @@ python -m grounded_qa.cli build sft-records \
 
 ```bash
 python -m sft_trainer.prepare_sft_dataset \
-  --train-paths data/grounded_qa/sft_records_train_sft.jsonl \
-  --validation-paths data/grounded_qa/sft_records_validation_sft.jsonl \
-  --test-paths data/grounded_qa/partitioned/test.jsonl \
-  --output-dir data/sft_dataset \
-  --overwrite-output \
-  --metrics-out outputs/sft/prepare_dataset_metrics.json
+  --train_paths data/grounded_qa/sft_records_train_sft.jsonl \
+  --validation_paths data/grounded_qa/sft_records_validation_sft.jsonl \
+  --test_paths data/grounded_qa/partitioned/test.jsonl \
+  --output_dir data/sft_dataset \
+  --overwrite_output \
+  --metrics_out outputs/sft/prepare_dataset_metrics.json
 ```
 
 ### 9. Train the SFT Model
