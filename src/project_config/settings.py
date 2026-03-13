@@ -108,7 +108,7 @@ class GenerationSettings:
 
     device: str = "cuda"
     device_map: Optional[str] = "auto"
-    dtype: str = "bfloat16"
+    dtype: str = "bf16"
     trust_remote_code: bool = True
     padding_side: str = "left"
     use_fast_tokenizer: bool = True
@@ -208,7 +208,7 @@ class TrainingSettings:
 
 @dataclass(frozen=True)
 class EvalStructuredGenerationSettings:
-    """Structured generation defaults for model evaluation."""
+    """Structured generation defaults for checkpoint evaluation under infer prompts."""
 
     split: str = "validation"
     max_samples: int = -1
@@ -219,7 +219,7 @@ class EvalStructuredGenerationSettings:
     top_p: float = 1.0
     repetition_penalty: float = 1.0
     prompt_mode: str = "infer"
-    fewshot_k: int = 2
+    fewshot_k: int = 0
     retry_on_protocol_fail: bool = False
     max_attempts: int = 1
     eval_track: str = "sft_structured"
@@ -227,12 +227,32 @@ class EvalStructuredGenerationSettings:
 
 
 @dataclass(frozen=True)
-class EvalFlatGenerationSettings:
-    """Flat generation defaults for model evaluation."""
+class EvalBaseProtocolSettings:
+    """Base-model protocol baseline defaults on the test split."""
 
     split: str = "test"
     max_samples: int = -1
-    include_base: bool = False
+    include_base: bool = True
+    batch_size: int = 16
+    max_new_tokens: int = 512
+    temperature: float = 0.2
+    top_p: float = 1.0
+    repetition_penalty: float = 1.0
+    prompt_mode: str = "teacher_fewshot"
+    fewshot_k: int = 2
+    retry_on_protocol_fail: bool = True
+    max_attempts: int = 3
+    eval_track: str = "base_protocol"
+    eval_variant: str = "fewshot_retry"
+
+
+@dataclass(frozen=True)
+class EvalFlatGenerationSettings:
+    """Flat base-task generation defaults on the test split."""
+
+    split: str = "test"
+    max_samples: int = -1
+    include_base: bool = True
     batch_size: int = 16
     max_new_tokens: int = 512
     think_max_new_tokens: int = 1024
@@ -245,12 +265,14 @@ class EvalFlatGenerationSettings:
 
 @dataclass(frozen=True)
 class EvalGroundedSettings:
-    """Structured grounded evaluation defaults."""
+    """Structured grounded-evaluation defaults for parsed protocol outputs."""
 
     split: str = "train"
     max_samples: int = -1
     enable_semantics: bool = True
     semantic_decision_source: str = "full_binary"
+    # This threshold is consumed by the rule-based correctness checker.
+    # It is a token-F1 cutoff against the reference answer, not an NLI semantic threshold.
     semantic_match_f1_threshold: float = 0.85
 
 
@@ -268,17 +290,19 @@ class EvalLossCurveSettings:
 
 @dataclass(frozen=True)
 class EvalTaskBaselineSettings:
-    """Flat task-baseline evaluation defaults."""
+    """Flat task-baseline evaluation defaults after answer extraction."""
 
     split: str = "train"
     max_samples: int = -1
     semantic_decision_source: str = "full_binary"
+    # This threshold is consumed by the rule-based correctness checker.
+    # It is a token-F1 cutoff against the reference answer, not an NLI semantic threshold.
     semantic_match_f1_threshold: float = 0.85
 
 
 @dataclass(frozen=True)
 class EvalDeepEvalSettings:
-    """DeepEval runtime defaults."""
+    """DeepEval runtime defaults shared by flat and structured modes."""
 
     split: str = "train"
     max_samples: int = -1
@@ -304,6 +328,7 @@ class EvalSettings:
     """Top-level evaluation defaults."""
 
     structured_generation: EvalStructuredGenerationSettings = field(default_factory=EvalStructuredGenerationSettings)
+    base_protocol: EvalBaseProtocolSettings = field(default_factory=EvalBaseProtocolSettings)
     loss_curve: EvalLossCurveSettings = field(default_factory=EvalLossCurveSettings)
     flat_generation: EvalFlatGenerationSettings = field(default_factory=EvalFlatGenerationSettings)
     grounded: EvalGroundedSettings = field(default_factory=EvalGroundedSettings)
@@ -324,6 +349,8 @@ class MatcherSettings:
 class CorrectnessSettings:
     """Rule-based correctness defaults."""
 
+    # This threshold is consumed by the rule-based correctness checker.
+    # It is a token-F1 cutoff against the reference answer, not an NLI semantic threshold.
     semantic_match_f1_threshold: float = 0.85
 
 

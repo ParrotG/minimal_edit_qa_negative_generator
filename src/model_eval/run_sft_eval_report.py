@@ -125,9 +125,9 @@ def parse_args() -> argparse.Namespace:
     if args.structured_max_new_tokens is None:
         args.structured_max_new_tokens = PROJECT_SETTINGS.eval.structured_generation.max_new_tokens
     if args.structured_max_attempts is None:
-        args.structured_max_attempts = 2
+        args.structured_max_attempts = PROJECT_SETTINGS.eval.structured_generation.max_attempts
     if args.base_protocol_max_new_tokens is None:
-        args.base_protocol_max_new_tokens = PROJECT_SETTINGS.eval.structured_generation.max_new_tokens
+        args.base_protocol_max_new_tokens = PROJECT_SETTINGS.eval.base_protocol.max_new_tokens
     if args.base_task_max_new_tokens is None:
         args.base_task_max_new_tokens = PROJECT_SETTINGS.eval.flat_generation.max_new_tokens
     if args.base_task_think_max_new_tokens is None:
@@ -135,13 +135,13 @@ def parse_args() -> argparse.Namespace:
     if args.record_token_usage is None:
         args.record_token_usage = PROJECT_SETTINGS.token_budget.record_token_usage
     if args.fewshot_k is None:
-        args.fewshot_k = PROJECT_SETTINGS.eval.structured_generation.fewshot_k
+        args.fewshot_k = PROJECT_SETTINGS.eval.base_protocol.fewshot_k
     if args.protocol_max_attempts is None:
-        args.protocol_max_attempts = 3
+        args.protocol_max_attempts = PROJECT_SETTINGS.eval.base_protocol.max_attempts
     if args.protocol_temperature is None:
-        args.protocol_temperature = PROJECT_SETTINGS.teacher_api.temperature
+        args.protocol_temperature = PROJECT_SETTINGS.eval.base_protocol.temperature
     if args.structured_temperature is None:
-        args.structured_temperature = PROJECT_SETTINGS.teacher_api.temperature
+        args.structured_temperature = PROJECT_SETTINGS.eval.structured_generation.temperature
     if args.task_temperature is None:
         args.task_temperature = PROJECT_SETTINGS.eval.flat_generation.temperature
     if args.enable_semantics is None:

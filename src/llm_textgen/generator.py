@@ -15,6 +15,27 @@ from prompt import build_qa_answer_prefix, build_qa_premise
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.IGNORECASE | re.DOTALL)
 _ROLE_PREFIX_RE = re.compile(r"^(?:\s*(?:system|user|assistant)\s*\n)+", flags=re.IGNORECASE)
 
+
+def _resolve_torch_dtype(dtype: Any) -> Any:
+    """Normalize string dtype aliases to torch dtype objects."""
+
+    if dtype is None or dtype == "":
+        return None
+    if not isinstance(dtype, str):
+        return dtype
+    lowered = dtype.strip().lower()
+    mapping = {
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+    }
+    if lowered not in mapping:
+        raise ValueError(f"Unsupported dtype alias: {dtype!r}")
+    return mapping[lowered]
+
 def _sanitize_generated_text(text: str, strip_think_tags: bool, strip_role_markers: bool) -> str:
     """Strip common role/thinking artifacts from generated text."""
 
@@ -71,7 +92,7 @@ class UnifiedTextGenerator:
         if device_map is not None:
             kwargs["device_map"] = device_map
         if self.config.dtype:
-            kwargs["dtype"] = self.config.dtype
+            kwargs["dtype"] = _resolve_torch_dtype(self.config.dtype)
 
         try:
             model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **kwargs)

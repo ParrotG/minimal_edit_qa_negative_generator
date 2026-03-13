@@ -113,7 +113,10 @@ def _build_prompt(sample: Dict[str, Any], prompt_mode: str, fewshot_k: int) -> s
     if prompt_mode == "teacher":
         return teacher_prompt
 
-    examples = _fewshot_examples()[: max(1, min(int(fewshot_k), 3))]
+    num_examples = max(0, min(int(fewshot_k), 3))
+    if num_examples <= 0:
+        return teacher_prompt
+    examples = _fewshot_examples()[:num_examples]
     rendered: List[str] = [
         "Few-shot format examples (follow the same JSON schema and field order):"
     ]
@@ -229,7 +232,7 @@ def _generate_batch_with_retry(
                     else ("teacher_v1" if args.prompt_mode == "teacher" else "teacher_fewshot_v1")
                 ),
                 "prompt_mode": args.prompt_mode,
-                "fewshot_k": int(max(1, min(int(args.fewshot_k), 3))) if args.prompt_mode == "teacher_fewshot" else 0,
+                "fewshot_k": int(max(0, min(int(args.fewshot_k), 3))) if args.prompt_mode == "teacher_fewshot" else 0,
                 "prompt": state["prompt"],
                 "raw_output": state["raw_output"],
                 "answer": state["raw_output"],
@@ -284,9 +287,6 @@ def _resolve_eval_variant(args: argparse.Namespace) -> str:
 def run_structured_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
     """Generate structured outputs for one or more model specs."""
 
-    if args.prompt_mode != "teacher_fewshot" and args.fewshot_k != 2:
-        # Keep compatibility while avoiding accidental confusion.
-        args.fewshot_k = int(args.fewshot_k)
     items = load_structured_generation_items(
         data_path=args.data_path,
         split=args.split,
