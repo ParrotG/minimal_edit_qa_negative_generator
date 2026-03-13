@@ -10,6 +10,7 @@ from unittest.mock import patch
 try:
     from calibrate.build_annotation_pack import _enrich_rows_from_sibling_generations
     from calibrate.common import build_annotation_pack_rows, group_rows, load_annotation_rows
+    from calibrate.evaluate_annotation_pack import _fit_nli_temperatures, _group_nli_rows, _search_nli_group
     from qa_checks import SemanticCheckReport, check_answer_correctness
     from qa_checks.correctness import CorrectnessConfig
 
@@ -44,6 +45,9 @@ except ModuleNotFoundError:  # pragma: no cover
     build_annotation_pack_rows = None
     group_rows = None
     load_annotation_rows = None
+    _fit_nli_temperatures = None
+    _group_nli_rows = None
+    _search_nli_group = None
     check_answer_correctness = None
     CorrectnessConfig = None
     parse_answer_extraction_output = None
@@ -689,6 +693,60 @@ class ModelEvalRefactorTests(unittest.TestCase):
         self.assertEqual(metrics["input_sources"]["a.jsonl"]["num_input_rows"], 1)
         self.assertEqual(metrics["input_sources"]["b.jsonl"]["num_input_rows"], 1)
 
+    def test_build_annotation_pack_rows_supports_all_tasks_from_mixed_sources(self) -> None:
+        rows = [
+            {
+                "input_source_path": "structured.jsonl",
+                "sample_id": 1,
+                "source_id": "s-structured",
+                "model_tag": "ckpt",
+                "model_step": 100,
+                "model_path": "checkpoint-100",
+                "question": "Who founded Acme?",
+                "knowledge": "Acme was founded by Alice.",
+                "reference_answer": "Alice",
+                "parsed_output": {
+                    "answerability": "answerable",
+                    "evidence": [{"quote": "Acme was founded by Alice."}],
+                    "rationale": "The evidence states that Alice founded Acme.",
+                    "answer": "Alice",
+                    "confidence": "high",
+                },
+                "correctness_ok": False,
+            },
+            {
+                "input_source_path": "flat.jsonl",
+                "sample_id": 2,
+                "source_id": "s-flat",
+                "model_tag": "base",
+                "model_step": 0,
+                "model_path": "base-model",
+                "question": "Who founded Beta?",
+                "knowledge": "Beta was founded by Bob.",
+                "reference_answer": "Bob",
+                "raw_answer": "Bob founded Beta.",
+                "extraction_parse_ok": True,
+                "refusal_detected": False,
+                "extracted_answer": "Bob",
+                "pred_answerability": "answerable",
+                "correctness_ok": False,
+            },
+        ]
+        pack_rows, metrics = build_annotation_pack_rows(
+            rows=rows,
+            task_types=["nli_structured", "nli_flat", "matcher"],
+            max_samples_per_task=-1,
+            seed=42,
+            pack_id="pack-mixed",
+        )
+        self.assertEqual({row["task_type"] for row in pack_rows}, {"nli_structured", "nli_flat", "matcher"})
+        flat_row = next(row for row in pack_rows if row["task_type"] == "nli_flat")
+        self.assertEqual(flat_row["input_source_path"], "flat.jsonl")
+        self.assertEqual(flat_row["hypothesis_text"], "Bob founded Beta.")
+        self.assertEqual(metrics["tasks"]["nli_flat"]["num_kept"], 1)
+        self.assertEqual(metrics["tasks"]["nli_structured"]["num_kept"], 1)
+        self.assertEqual(metrics["tasks"]["matcher"]["num_kept"], 2)
+
     def test_annotation_pack_can_enrich_old_details_from_sibling_generations(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             details_path = Path(tmpdir) / "base_task_think_details.jsonl"
@@ -735,6 +793,84 @@ class ModelEvalRefactorTests(unittest.TestCase):
             enriched = _enrich_rows_from_sibling_generations(str(details_path), [dict(row) for row in load_dataset_split(str(details_path), "train")])
         self.assertEqual(enriched[0]["knowledge"], "Acme was founded by Alice.")
 
+    def test_fit_nli_temperatures_uses_group_rows_function(self) -> None:
+        fit_map = _fit_nli_temperatures(
+            rows=[
+                {
+                    "model_tag": "base",
+                    "model_step": 0,
+                    "model_path": "base",
+                    "task_type": "nli_flat",
+                    "human_label_bool": True,
+                    "nli_entail": 0.8,
+                    "nli_neutral": 0.1,
+                    "nli_contradict": 0.1,
+                },
+                {
+                    "model_tag": "base",
+                    "model_step": 0,
+                    "model_path": "base",
+                    "task_type": "nli_structured",
+                    "human_label_bool": False,
+                    "nli_entail": 0.2,
+                    "nli_neutral": 0.2,
+                    "nli_contradict": 0.6,
+                },
+                {
+                    "model_tag": "base",
+                    "model_step": 0,
+                    "model_path": "base",
+                    "task_type": "nli_flat",
+                    "human_label_bool": False,
+                    "nli_entail": 0.2,
+                    "nli_neutral": 0.2,
+                    "nli_contradict": 0.6,
+                },
+            ],
+            group_by="task",
+            temperature_values=[0.5, 1.0],
+        )
+        self.assertIn(("nli",), fit_map)
+        self.assertIn("temperature", fit_map[("nli",)])
+
+    def test_group_nli_rows_merges_flat_and_structured_tasks(self) -> None:
+        grouped = _group_nli_rows(
+            [
+                {"task_type": "nli_flat", "model_tag": "base", "model_step": 0, "model_path": "base"},
+                {"task_type": "nli_structured", "model_tag": "base", "model_step": 0, "model_path": "base"},
+            ],
+            group_by="task",
+        )
+        self.assertEqual(list(grouped.keys()), [("nli",)])
+        self.assertEqual(len(grouped[("nli",)]), 2)
+
+    def test_search_nli_group_defaults_to_no_reject_methods(self) -> None:
+        search_rows, best_row = _search_nli_group(
+            rows=[
+                {
+                    "human_label_bool": True,
+                    "nli_argmax_label_calib": "entail",
+                    "nli_argmax_prob_calib": 0.9,
+                    "nli_margin_logit_entail_vs_max_other_calib": 1.2,
+                },
+                {
+                    "human_label_bool": False,
+                    "nli_argmax_label_calib": "contradict",
+                    "nli_argmax_prob_calib": 0.8,
+                    "nli_margin_logit_entail_vs_max_other_calib": -1.1,
+                },
+            ],
+            objective="f1",
+            enable_reject_search=False,
+            reject_alpha=0.25,
+            margin_thresholds=[0.0],
+            argmax_conf_thresholds=[0.9],
+            band_half_widths=[0.1],
+            group_meta={"task_type": "nli", "group_by": "task", "model_tag": None, "model_step": None, "model_path": None},
+        )
+        self.assertEqual({row["method"] for row in search_rows}, {"argmax", "margin"})
+        self.assertIn(best_row["method"], {"argmax", "margin"})
+
     def test_load_annotation_rows_parses_binary_human_labels(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "annotations.jsonl"
@@ -769,6 +905,7 @@ class ModelEvalRefactorTests(unittest.TestCase):
     def test_project_settings_use_task_level_f1_calibration_defaults(self) -> None:
         self.assertEqual(PROJECT_SETTINGS.calibration.group_by, "task")
         self.assertEqual(PROJECT_SETTINGS.calibration.search_objective, "f1")
+        self.assertFalse(PROJECT_SETTINGS.calibration.enable_nli_reject_search)
 
     def test_api_generator_estimates_missing_token_usage(self) -> None:
         cfg = ApiGenerationConfig(

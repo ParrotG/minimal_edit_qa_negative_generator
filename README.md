@@ -328,16 +328,16 @@ The package name is `calibrate`. The previous `cablibrate` spelling was a typo a
 
 ### Recommended Inputs
 
-- `nli_structured`: use `eval_grounded_qa` details, for example `outputs/model_eval/final_report/validation/sft_val_structured_details.jsonl`
-- `nli_flat` and `matcher`: use `eval_task_content_baseline` details, for example `outputs/model_eval/final_report/test/base_task_think_details.jsonl`
+- `nli_structured`: use `eval_grounded_qa` details, for example `outputs/model_eval/validation/sft_val_structured_details.jsonl`
+- `nli_flat` and `matcher`: use `eval_task_content_baseline` details, for example `outputs/model_eval/test/base_task_think_details.jsonl`
 - If you want to calibrate multiple sources together, repeat `--data_path` and the builder will sample from the combined pool
+- Mixed-task sampling is task-aware: `nli_structured` samples only structured-applicable rows, while `nli_flat` and flat-side `matcher` sample only flat evaluation rows that actually entered the corresponding checker path
 
 ### Build an Annotation Pack
 
 ```bash
 python -m calibrate.build_annotation_pack \
   --data_path outputs/model_eval/validation/sft_val_structured_details.jsonl \
-  --data_path outputs/model_eval/test/base_protocol_details.jsonl \
   --data_path outputs/model_eval/test/base_task_think_details.jsonl \
   --data_path outputs/model_eval/test/base_task_no_think_details.jsonl \
   --task_types nli_structured,nli_flat,matcher \
@@ -345,14 +345,7 @@ python -m calibrate.build_annotation_pack \
   --metrics_out outputs/calibration/annotation_pack_metrics.json
 ```
 
-```bash
-python -m calibrate.build_annotation_pack \
-  --data_path outputs/model_eval/final_report/test/base_task_think_details.jsonl \
-  --data_path outputs/model_eval/final_report/test/base_task_no_think_details.jsonl \
-  --task_types nli_flat,matcher \
-  --out_jsonl outputs/calibration/annotation_pack_flat_matcher.jsonl \
-  --metrics_out outputs/calibration/annotation_pack_flat_matcher_metrics.json
-```
+The builder metrics file records per-input-path counts and skip reasons. If a mixed command unexpectedly misses one task type, inspect `num_candidate_rows` and the `num_skipped_*` counters for that task before changing thresholds.
 
 Each annotation row contains the model-facing fields plus two human fields:
 
@@ -363,26 +356,19 @@ Each annotation row contains the model-facing fields plus two human fields:
 
 ```bash
 python -m calibrate.evaluate_annotation_pack \
-  --data_path outputs/calibration/annotation_pack_structured_labeled.jsonl \
-  --out_jsonl outputs/calibration/scored_rows_structured.jsonl \
-  --summary_csv outputs/calibration/summary_structured.csv \
-  --summary_json outputs/calibration/summary_structured.json \
-  --best_out outputs/calibration/best_params_structured.json
-```
-
-```bash
-python -m calibrate.evaluate_annotation_pack \
-  --data_path outputs/calibration/annotation_pack_flat_matcher_labeled.jsonl \
-  --out_jsonl outputs/calibration/scored_rows_flat_matcher.jsonl \
-  --summary_csv outputs/calibration/summary_flat_matcher.csv \
-  --summary_json outputs/calibration/summary_flat_matcher.json \
-  --best_out outputs/calibration/best_params_flat_matcher.json
+  --data_path outputs/calibration/annotation_pack_labeled.jsonl \
+  --out_jsonl outputs/calibration/scored_rows.jsonl \
+  --summary_csv outputs/calibration/summary.csv \
+  --summary_json outputs/calibration/summary.json \
+  --best_out outputs/calibration/best_params.json
 ```
 
 Default calibration behavior:
 
-- calibration is aggregated by `task_type`, not by checkpoint
+- `nli_flat` and `nli_structured` are calibrated jointly as one NLI task family
+- calibration is aggregated by task family by default, not by checkpoint
 - the default search objective is `f1`
+- NLI search defaults to no-reject strategies only (`argmax` and `margin`)
 - `model_tag`, `model_step`, and `model_path` are retained only for traceability
 
 Outputs:

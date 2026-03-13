@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import random
 from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -382,6 +383,42 @@ def extract_evidence_text(row: Dict[str, Any]) -> str:
     return "\n".join(quotes).strip()
 
 
+def is_flat_detail_row(row: Dict[str, Any]) -> bool:
+    """Return whether a row comes from flat evaluation with extraction state."""
+
+    if extract_structured_payload(row) is not None:
+        return False
+    return any(
+        key in row
+        for key in ("extraction_parse_ok", "refusal_detected", "extracted_answer", "pred_answerability")
+    ) or (
+        bool(str(row.get("eval_track") or "").strip() == "base_task")
+        or bool(str(row.get("raw_answer") or "").strip())
+        or (
+            bool(str(row.get("question") or "").strip())
+            and bool(str(row.get("knowledge") or "").strip())
+            and bool(str(row.get("answer") or "").strip())
+        )
+    )
+
+
+def is_structured_detail_row(row: Dict[str, Any]) -> bool:
+    """Return whether a row comes from structured evaluation."""
+
+    if extract_structured_payload(row) is not None:
+        return True
+    return any(key in row for key in ("parse_ok", "protocol_ok", "protocol_report", "parsed_output", "raw_output"))
+
+
+def has_flat_eval_state(row: Dict[str, Any]) -> bool:
+    """Return whether a flat row already passed through extraction/refusal evaluation."""
+
+    return any(
+        key in row
+        for key in ("extraction_parse_ok", "refusal_detected", "extracted_answer", "pred_answerability")
+    )
+
+
 def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Build one annotation-pack row for a task type from a mixed evaluation row."""
 
@@ -391,17 +428,17 @@ def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: in
     rationale = extract_rationale_text(row)
     evidence_text = extract_evidence_text(row)
     structured_payload = extract_structured_payload(row)
-    has_eval_state = any(
-        key in row
-        for key in ("extraction_parse_ok", "refusal_detected", "extracted_answer", "pred_answerability", "correctness_ok")
-    )
+    is_flat_row = is_flat_detail_row(row)
+    is_structured_row = is_structured_detail_row(row)
 
     answer = ""
 
     premise_text = ""
     hypothesis_text = ""
     if task_type == "nli_flat":
-        if not has_eval_state:
+        if not is_flat_row:
+            return None, "missing_eval_state"
+        if not has_flat_eval_state(row):
             return None, "missing_eval_state"
         if not is_flat_answerable_for_content_eval(row):
             skipped = "refusal_or_unanswerable" if row.get("refusal_detected") is True or str(row.get("pred_answerability") or "") == "unanswerable" else "missing_fields"
@@ -414,6 +451,8 @@ def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: in
         premise_text = build_qa_premise(knowledge=knowledge, question=question)
         hypothesis_text = answer
     elif task_type == "nli_structured":
+        if not is_structured_row:
+            return None, "missing_fields"
         if not is_structured_answerable_for_semantic_eval(row):
             return None, "refusal_or_unanswerable"
         answer = str((structured_payload or {}).get("answer") or "").strip()
@@ -422,12 +461,16 @@ def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: in
         premise_text = build_qa_premise(knowledge=evidence_text, question=question)
         hypothesis_text = f"{rationale}\nTherefore the answer is {answer}"
     elif task_type == "matcher":
-        if not has_eval_state:
+        if not is_flat_row and not is_structured_row:
             return None, "missing_eval_state"
-        if not is_flat_matcher_applicable(row) and not is_structured_matcher_applicable(row):
+        if is_flat_row and not is_structured_row and not has_flat_eval_state(row):
+            return None, "missing_eval_state"
+        flat_applicable = is_flat_row and is_flat_matcher_applicable(row)
+        structured_applicable = is_structured_row and is_structured_matcher_applicable(row)
+        if not flat_applicable and not structured_applicable:
             skipped = "matcher_not_applicable" if row.get("correctness_ok") is not None else "refusal_or_unanswerable"
             return None, skipped
-        answer = str(row.get("extracted_answer") or "").strip() if has_eval_state else str((structured_payload or {}).get("answer") or "").strip()
+        answer = str(row.get("extracted_answer") or "").strip() if flat_applicable else str((structured_payload or {}).get("answer") or "").strip()
         if not answer:
             answer = extract_final_answer_text(row)
         if not question or not knowledge or not reference_answer or not answer:
@@ -463,6 +506,38 @@ def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: in
     }, None)
 
 
+def _build_task_candidate_rows(
+    *,
+    rows: Sequence[Dict[str, Any]],
+    task_type: str,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Pre-filter rows for a calibration task before deterministic sampling."""
+
+    candidates: List[Dict[str, Any]] = []
+    counts = {
+        "num_candidate_rows": 0,
+        "num_skipped_wrong_row_type": 0,
+    }
+    for row in rows:
+        is_flat_row = is_flat_detail_row(row)
+        is_structured_row = is_structured_detail_row(row)
+        keep = False
+        if task_type == "nli_flat":
+            keep = is_flat_row
+        elif task_type == "nli_structured":
+            keep = is_structured_row
+        elif task_type == "matcher":
+            keep = is_flat_row or is_structured_row
+        else:
+            raise ValueError(f"Unsupported task_type: {task_type}")
+        if keep:
+            candidates.append(dict(row))
+            counts["num_candidate_rows"] += 1
+        else:
+            counts["num_skipped_wrong_row_type"] += 1
+    return candidates, counts
+
+
 def build_annotation_pack_rows(
     *,
     rows: Sequence[Dict[str, Any]],
@@ -473,8 +548,6 @@ def build_annotation_pack_rows(
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Build a mixed annotation pack with deterministic per-task sampling."""
 
-    ds = Dataset.from_list([dict(row) for row in rows]).shuffle(seed=seed)
-    shuffled_rows = [dict(row) for row in ds]
     out_rows: List[Dict[str, Any]] = []
     metrics: Dict[str, Any] = {
         "pack_id": pack_id,
@@ -494,6 +567,12 @@ def build_annotation_pack_rows(
     }
 
     for task_type in task_types:
+        candidate_rows, candidate_metrics = _build_task_candidate_rows(rows=rows, task_type=task_type)
+        if candidate_rows:
+            shuffled_rows = [dict(row) for row in candidate_rows]
+            random.Random(seed).shuffle(shuffled_rows)
+        else:
+            shuffled_rows = []
         kept = 0
         skipped_missing = 0
         skipped_missing_eval_state = 0
@@ -533,6 +612,7 @@ def build_annotation_pack_rows(
             if max_samples_per_task > 0 and kept >= max_samples_per_task:
                 break
         metrics["tasks"][task_type] = {
+            **candidate_metrics,
             "num_kept": kept,
             "num_skipped_missing_fields": skipped_missing,
             "num_skipped_missing_eval_state": skipped_missing_eval_state,

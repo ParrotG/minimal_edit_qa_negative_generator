@@ -132,6 +132,7 @@ class CalibrationSettings:
 
     group_by: str = "task"
     search_objective: str = "f1"
+    enable_nli_reject_search: bool = False
     reject_alpha: float = 0.25
     positive_label_values: str = "1,true,yes,supported,faithful,correct,entail"
     negative_label_values: str = "0,false,no,unsupported,unfaithful,incorrect,neutral,contradict"

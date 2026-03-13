@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
         default=PROJECT_SETTINGS.calibration.search_objective,
         choices=["cohen_kappa", "f1", "accuracy"],
     )
+    parser.add_argument(
+        "--enable_nli_reject_search",
+        action=argparse.BooleanOptionalAction,
+        default=PROJECT_SETTINGS.calibration.enable_nli_reject_search,
+        help="Whether to include reject-based NLI search strategies. Disabled by default.",
+    )
     parser.add_argument("--reject_alpha", type=float, default=PROJECT_SETTINGS.calibration.reject_alpha)
 
     parser.add_argument("--nli_model_name", type=str, default=NLIConfig.model_name)
@@ -102,6 +108,30 @@ def _group_meta_from_key(group_key: Tuple[Any, ...], group_by: str) -> Dict[str,
             "model_path": str(group_key[3]),
         }
     raise ValueError(f"Unsupported calibration group_by: {group_by}")
+
+
+def _group_nli_rows(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    group_by: str,
+) -> Dict[Tuple[Any, ...], List[Dict[str, Any]]]:
+    """Group flat and structured NLI rows into one shared calibration family."""
+
+    grouped: Dict[Tuple[Any, ...], List[Dict[str, Any]]] = {}
+    for row in rows:
+        if group_by == "task":
+            key: Tuple[Any, ...] = ("nli",)
+        elif group_by == "task_and_model":
+            key = (
+                "nli",
+                str(row.get("model_tag") or "model"),
+                int(row.get("model_step") or 0),
+                str(row.get("model_path") or row.get("model_tag") or "model"),
+            )
+        else:
+            raise ValueError(f"Unsupported calibration group_by: {group_by}")
+        grouped.setdefault(key, []).append(dict(row))
+    return grouped
 
 
 def _to_logit(prob: float, eps: float = 1e-12) -> float:
@@ -272,6 +302,7 @@ def _search_nli_group(
     *,
     rows: Sequence[Dict[str, Any]],
     objective: str,
+    enable_reject_search: bool,
     reject_alpha: float,
     margin_thresholds: Sequence[float],
     argmax_conf_thresholds: Sequence[float],
@@ -302,35 +333,36 @@ def _search_nli_group(
                 ),
             }
         )
-    for threshold in argmax_conf_thresholds:
-        search_rows.append(
-            {
-                **group_meta,
-                "method": "argmax_with_reject",
-                "argmax_conf_threshold": float(threshold),
-                **_evaluate_predictions(
-                    rows=rows,
-                    predictions=_method_argmax_with_reject(rows, min_conf=float(threshold)),
-                    label_field="human_label_bool",
-                    reject_alpha=reject_alpha,
-                ),
-            }
-        )
-    for margin_threshold, half_width in iter_grid(margin_thresholds, band_half_widths):
-        search_rows.append(
-            {
-                **group_meta,
-                "method": "margin_with_reject_band",
-                "margin_threshold": float(margin_threshold),
-                "band_half_width": float(half_width),
-                **_evaluate_predictions(
-                    rows=rows,
-                    predictions=_method_margin_with_reject_band(rows, threshold=float(margin_threshold), half_width=float(half_width)),
-                    label_field="human_label_bool",
-                    reject_alpha=reject_alpha,
-                ),
-            }
-        )
+    if enable_reject_search:
+        for threshold in argmax_conf_thresholds:
+            search_rows.append(
+                {
+                    **group_meta,
+                    "method": "argmax_with_reject",
+                    "argmax_conf_threshold": float(threshold),
+                    **_evaluate_predictions(
+                        rows=rows,
+                        predictions=_method_argmax_with_reject(rows, min_conf=float(threshold)),
+                        label_field="human_label_bool",
+                        reject_alpha=reject_alpha,
+                    ),
+                }
+            )
+        for margin_threshold, half_width in iter_grid(margin_thresholds, band_half_widths):
+            search_rows.append(
+                {
+                    **group_meta,
+                    "method": "margin_with_reject_band",
+                    "margin_threshold": float(margin_threshold),
+                    "band_half_width": float(half_width),
+                    **_evaluate_predictions(
+                        rows=rows,
+                        predictions=_method_margin_with_reject_band(rows, threshold=float(margin_threshold), half_width=float(half_width)),
+                        label_field="human_label_bool",
+                        reject_alpha=reject_alpha,
+                    ),
+                }
+            )
 
     best_row = _select_best_search_row(search_rows, objective=objective)
     return search_rows, best_row
@@ -408,10 +440,10 @@ def _fit_nli_temperatures(
     group_by: str,
     temperature_values: Sequence[float],
 ) -> Dict[Tuple[Any, ...], Dict[str, float]]:
-    grouped = group_rows(rows, group_by=group_by)
+    grouped = _group_nli_rows(rows, group_by=group_by)
     fit_map: Dict[Tuple[Any, ...], Dict[str, float]] = {}
-    for key, group_rows in grouped.items():
-        labeled_rows = [row for row in group_rows if row.get("human_label_bool") is not None]
+    for key, grouped_rows in grouped.items():
+        labeled_rows = [row for row in grouped_rows if row.get("human_label_bool") is not None]
         fit_map[key] = _fit_temperature(labeled_rows, temperature_values)
     return fit_map
 
@@ -451,7 +483,7 @@ def main() -> None:
             name="temperature",
         )
         fit_map = _fit_nli_temperatures(rows=scored_nli_rows, group_by=args.group_by, temperature_values=temperature_values)
-        grouped_nli_rows = group_rows(scored_nli_rows, group_by=args.group_by)
+        grouped_nli_rows = _group_nli_rows(scored_nli_rows, group_by=args.group_by)
         margin_thresholds = build_values(
             explicit=args.margin_threshold_values,
             v_min=args.margin_threshold_min,
@@ -473,9 +505,9 @@ def main() -> None:
             v_step=args.band_half_width_step,
             name="band_half_width",
         )
-        for key, group_rows in grouped_nli_rows.items():
+        for key, grouped_rows in grouped_nli_rows.items():
             fit_payload = fit_map[key]
-            calibrated_rows = [_apply_temperature(row, float(fit_payload["temperature"])) for row in group_rows]
+            calibrated_rows = [_apply_temperature(row, float(fit_payload["temperature"])) for row in grouped_rows]
             scored_rows.extend(calibrated_rows)
             group_meta = {
                 **_group_meta_from_key(key, args.group_by),
@@ -485,6 +517,7 @@ def main() -> None:
             group_search_rows, best_row = _search_nli_group(
                 rows=calibrated_rows,
                 objective=args.search_objective,
+                enable_reject_search=bool(args.enable_nli_reject_search),
                 reject_alpha=args.reject_alpha,
                 margin_thresholds=margin_thresholds,
                 argmax_conf_thresholds=argmax_conf_thresholds,
@@ -508,10 +541,10 @@ def main() -> None:
             v_step=args.matcher_threshold_step,
             name="matcher_threshold",
         )
-        for key, group_rows in grouped_matcher_rows.items():
+        for key, grouped_rows in grouped_matcher_rows.items():
             group_meta = _group_meta_from_key(key, args.group_by)
             group_search_rows, best_row = _search_matcher_group(
-                rows=group_rows,
+                rows=grouped_rows,
                 thresholds=matcher_thresholds,
                 objective=args.search_objective,
                 group_meta=group_meta,
