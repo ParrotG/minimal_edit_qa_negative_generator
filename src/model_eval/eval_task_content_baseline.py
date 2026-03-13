@@ -147,23 +147,32 @@ def _evaluate_model_rows(
         return {
             "num_rows": 0,
             "extraction_parse_ok_rate": float("nan"),
+            "usable_rate": float("nan"),
             "refusal_detected_rate": float("nan"),
-            "answerability_total": 0,
-            "answerability_accuracy_given_extraction_parse_ok": float("nan"),
-            "answerability_accuracy_all_samples": float("nan"),
+            "num_source_answerable": 0,
+            "num_source_unanswerable": 0,
+            "num_e2e_answerability_success": 0,
+            "e2e_answerability_accuracy": float("nan"),
             "content_eval_total": 0,
-            "content_eval_rate_all_samples": float("nan"),
+            "content_eval_gate_rate": float("nan"),
             "num_refusal_or_unanswerable_skipped": 0,
             "correctness_total": 0,
-            "correctness_strict_rate_on_entered_content_eval": float("nan"),
-            "correctness_strict_rate_all_samples": float("nan"),
+            "correctness_strict_ok": 0,
             "correctness_matcher_review_total": 0,
             "correctness_matcher_positive_rate": float("nan"),
-            "correctness_reviewed_rate_on_entered_content_eval": float("nan"),
-            "correctness_reviewed_rate_all_samples": float("nan"),
+            "correctness_reviewed_ok": 0,
+            "num_e2e_reviewed_correctness_success": 0,
+            "e2e_reviewed_correctness_success_rate": float("nan"),
             "semantic_total": 0,
-            "semantic_yes_rate_on_entered_content_eval": float("nan"),
-            "semantic_yes_rate_all_samples": float("nan"),
+            "semantic_yes": 0,
+            "num_e2e_semantic_success": 0,
+            "e2e_semantic_success_rate": float("nan"),
+            "num_answerable_reviewed_correctness_success": 0,
+            "answerable_reviewed_correctness_success_rate": float("nan"),
+            "num_answerable_semantic_success": 0,
+            "answerable_semantic_success_rate": float("nan"),
+            "num_unanswerable_success": 0,
+            "unanswerable_success_rate": float("nan"),
             "semantic_margin_mean": float("nan"),
         }, []
 
@@ -177,8 +186,9 @@ def _evaluate_model_rows(
 
     parse_ok_count = 0
     refusal_detected_count = 0
-    answerability_total = 0
-    answerability_correct = 0
+    num_source_answerable = 0
+    num_source_unanswerable = 0
+    num_e2e_answerability_success = 0
     content_eval_total = 0
     refusal_or_unanswerable_skipped = 0
     correctness_total = 0
@@ -192,12 +202,17 @@ def _evaluate_model_rows(
             refusal_detected_count += 1
 
         gold_label = str(row.get("answerability_label") or "").strip()
+        source_is_answerable = gold_label == "answerable"
+        source_is_unanswerable = gold_label == "unanswerable"
+        num_source_answerable += int(source_is_answerable)
+        num_source_unanswerable += int(source_is_unanswerable)
         pred_label: Optional[str] = None
         if extraction_parse_ok and refusal_detected is not None:
             pred_label = "unanswerable" if bool(refusal_detected) else "answerable"
-            if gold_label:
-                answerability_total += 1
-                answerability_correct += int(pred_label == gold_label)
+        answerability_match = None if pred_label is None or not gold_label else bool(pred_label == gold_label)
+        usable = extraction_parse_ok
+        e2e_answerability_success = bool(usable and answerability_match)
+        num_e2e_answerability_success += int(e2e_answerability_success)
 
         extracted_answer = str(row.get("extracted_answer") or "").strip()
         raw_answer = str(row.get("answer") or "").strip()
@@ -205,7 +220,11 @@ def _evaluate_model_rows(
             **row,
             "pred_answerability": pred_label,
         }
-        entered_content_eval = is_flat_answerable_for_content_eval(gate_row)
+        entered_content_eval = bool(
+            source_is_answerable
+            and e2e_answerability_success
+            and is_flat_answerable_for_content_eval(gate_row)
+        )
         skipped_reason = "" if entered_content_eval else flat_content_eval_skipped_reason(gate_row)
         if entered_content_eval:
             content_eval_total += 1
@@ -242,8 +261,9 @@ def _evaluate_model_rows(
         details.append(
             {
                 **row,
+                "usable": usable,
                 "pred_answerability": pred_label,
-                "answerability_match": None if pred_label is None or not gold_label else bool(pred_label == gold_label),
+                "answerability_match": answerability_match,
                 "strict_report": strict_report,
                 "correctness_matcher_report": None,
                 "judge_payload": None,
@@ -251,6 +271,9 @@ def _evaluate_model_rows(
                 "semantic_margin": None,
                 "entered_content_eval": entered_content_eval,
                 "content_eval_skipped_reason": skipped_reason,
+                "e2e_answerability_success": e2e_answerability_success,
+                "source_is_answerable": source_is_answerable,
+                "source_is_unanswerable": source_is_unanswerable,
             }
         )
 
@@ -273,6 +296,11 @@ def _evaluate_model_rows(
     semantic_total = 0
     semantic_yes = 0
     semantic_margins: List[float] = []
+    num_e2e_reviewed_correctness_success = 0
+    num_e2e_semantic_success = 0
+    num_answerable_reviewed_correctness_success = 0
+    num_answerable_semantic_success = 0
+    num_unanswerable_success = 0
     output_rows: List[Dict[str, Any]] = []
 
     for row in details:
@@ -295,6 +323,24 @@ def _evaluate_model_rows(
         if semantic_margin is not None:
             semantic_margins.append(float(semantic_margin))
 
+        source_is_answerable = bool(row.get("source_is_answerable"))
+        source_is_unanswerable = bool(row.get("source_is_unanswerable"))
+        e2e_answerability_success = bool(row.get("e2e_answerability_success"))
+        entered_content_eval = bool(row.get("entered_content_eval"))
+        e2e_reviewed_correctness_success = False
+        e2e_semantic_success = False
+        if source_is_unanswerable:
+            e2e_reviewed_correctness_success = e2e_answerability_success
+            e2e_semantic_success = e2e_answerability_success
+            num_unanswerable_success += int(e2e_answerability_success)
+        elif source_is_answerable:
+            e2e_reviewed_correctness_success = bool(entered_content_eval and reviewed_ok)
+            e2e_semantic_success = bool(entered_content_eval and semantic_decision == "yes")
+            num_answerable_reviewed_correctness_success += int(e2e_reviewed_correctness_success)
+            num_answerable_semantic_success += int(e2e_semantic_success)
+        num_e2e_reviewed_correctness_success += int(e2e_reviewed_correctness_success)
+        num_e2e_semantic_success += int(e2e_semantic_success)
+
         output_rows.append(
             {
                 "model_tag": row.get("model_tag"),
@@ -310,6 +356,7 @@ def _evaluate_model_rows(
                 "reference_answer": row.get("reference_answer"),
                 "raw_answer": row.get("answer"),
                 "answerability_label": row.get("answerability_label"),
+                "usable": bool(row.get("usable")),
                 "pred_answerability": row.get("pred_answerability"),
                 "answerability_match": row.get("answerability_match"),
                 "extraction_raw_response": row.get("extraction_raw_response"),
@@ -322,8 +369,13 @@ def _evaluate_model_rows(
                 "extracted_answer": row.get("extracted_answer"),
                 "refusal_detected": row.get("refusal_detected"),
                 "refusal_reason": row.get("refusal_reason"),
-                "entered_content_eval": bool(row.get("entered_content_eval")),
+                "entered_content_eval": entered_content_eval,
                 "content_eval_skipped_reason": row.get("content_eval_skipped_reason"),
+                "e2e_answerability_success": e2e_answerability_success,
+                "e2e_reviewed_correctness_success": e2e_reviewed_correctness_success,
+                "e2e_semantic_success": e2e_semantic_success,
+                "source_is_answerable": source_is_answerable,
+                "source_is_unanswerable": source_is_unanswerable,
                 "correctness_ok": None if strict_report is None else strict_report.ok,
                 "correctness_exact_match": None if strict_report is None else strict_report.exact_match,
                 "correctness_token_f1": None if strict_report is None else strict_report.token_f1,
@@ -339,27 +391,33 @@ def _evaluate_model_rows(
     metrics = {
         "num_rows": len(rows),
         "extraction_parse_ok_rate": _safe_rate(parse_ok_count, len(rows)),
+        "usable_rate": _safe_rate(parse_ok_count, len(rows)),
         "refusal_detected_rate": _safe_rate(refusal_detected_count, len(rows)),
-        "answerability_total": answerability_total,
-        "answerability_correct": answerability_correct,
-        "answerability_accuracy_given_extraction_parse_ok": _safe_rate(answerability_correct, parse_ok_count),
-        "answerability_accuracy_all_samples": _safe_rate(answerability_correct, len(rows)),
+        "num_source_answerable": num_source_answerable,
+        "num_source_unanswerable": num_source_unanswerable,
+        "num_e2e_answerability_success": num_e2e_answerability_success,
+        "e2e_answerability_accuracy": _safe_rate(num_e2e_answerability_success, len(rows)),
         "content_eval_total": content_eval_total,
-        "content_eval_rate_all_samples": _safe_rate(content_eval_total, len(rows)),
+        "content_eval_gate_rate": _safe_rate(content_eval_total, len(rows)),
         "num_refusal_or_unanswerable_skipped": refusal_or_unanswerable_skipped,
         "correctness_total": correctness_total,
         "correctness_strict_ok": correctness_strict_ok,
-        "correctness_strict_rate_on_entered_content_eval": _safe_rate(correctness_strict_ok, content_eval_total),
-        "correctness_strict_rate_all_samples": _safe_rate(correctness_strict_ok, len(rows)),
         "correctness_matcher_review_total": correctness_matcher_review_total,
         "correctness_matcher_positive": correctness_matcher_positive,
         "correctness_matcher_positive_rate": _safe_rate(correctness_matcher_positive, correctness_matcher_review_total),
         "correctness_reviewed_ok": correctness_reviewed_ok,
-        "correctness_reviewed_rate_on_entered_content_eval": _safe_rate(correctness_reviewed_ok, content_eval_total),
-        "correctness_reviewed_rate_all_samples": _safe_rate(correctness_reviewed_ok, len(rows)),
+        "num_e2e_reviewed_correctness_success": num_e2e_reviewed_correctness_success,
+        "e2e_reviewed_correctness_success_rate": _safe_rate(num_e2e_reviewed_correctness_success, len(rows)),
         "semantic_total": semantic_total,
-        "semantic_yes_rate_on_entered_content_eval": _safe_rate(semantic_yes, content_eval_total),
-        "semantic_yes_rate_all_samples": _safe_rate(semantic_yes, len(rows)),
+        "semantic_yes": semantic_yes,
+        "num_e2e_semantic_success": num_e2e_semantic_success,
+        "e2e_semantic_success_rate": _safe_rate(num_e2e_semantic_success, len(rows)),
+        "num_answerable_reviewed_correctness_success": num_answerable_reviewed_correctness_success,
+        "answerable_reviewed_correctness_success_rate": _safe_rate(num_answerable_reviewed_correctness_success, num_source_answerable),
+        "num_answerable_semantic_success": num_answerable_semantic_success,
+        "answerable_semantic_success_rate": _safe_rate(num_answerable_semantic_success, num_source_answerable),
+        "num_unanswerable_success": num_unanswerable_success,
+        "unanswerable_success_rate": _safe_rate(num_unanswerable_success, num_source_unanswerable),
         "semantic_margin_mean": _safe_mean(semantic_margins),
     }
     return metrics, output_rows

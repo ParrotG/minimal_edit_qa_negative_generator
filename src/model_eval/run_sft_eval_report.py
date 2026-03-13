@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +21,12 @@ from .eval_sft_loss_curve import run_sft_loss_curve
 from .eval_task_content_baseline import run_task_content_baseline
 from .generate_answers import run_answer_generation
 from .generate_structured_answers import run_structured_generation
+from .summary_builders import (
+    build_test_summary_rows as _build_test_summary_rows_common,
+    build_validation_summary_rows as _build_validation_summary_rows_common,
+    constraint_pass as _constraint_pass_common,
+    select_best_checkpoint as _select_best_checkpoint_common,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task_batch_size", type=int, default=16)
     parser.add_argument("--max_length", type=int, default=1024)
     parser.add_argument("--structured_max_new_tokens", type=int, default=512)
+    parser.add_argument("--structured_max_attempts", type=int, default=2)
     parser.add_argument("--base_protocol_max_new_tokens", type=int, default=512)
     parser.add_argument("--base_task_max_new_tokens", type=int, default=512)
     parser.add_argument("--base_task_think_max_new_tokens", type=int, default=1024)
@@ -49,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fewshot_k", type=int, default=2)
     parser.add_argument("--protocol_max_attempts", type=int, default=3)
     parser.add_argument("--protocol_temperature", type=float, default=0.2)
-    parser.add_argument("--structured_temperature", type=float, default=0.0)
+    parser.add_argument("--structured_temperature", type=float, default=0.2)
     parser.add_argument("--task_temperature", type=float, default=0.0)
 
     parser.add_argument("--parse_ok_threshold", type=float, default=0.95)
@@ -110,16 +116,6 @@ def _model_key(row: Dict[str, Any]) -> Tuple[str, int, str, str, str]:
     )
 
 
-def _safe_metric(value: Any, *, nan_for_max: float = float("-inf"), nan_for_min: float = float("inf")) -> Tuple[float, float]:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return nan_for_max, nan_for_min
-    if math.isnan(numeric):
-        return nan_for_max, nan_for_min
-    return numeric, numeric
-
-
 def _is_ckpt_row(row: Dict[str, Any]) -> bool:
     return str(row.get("model_tag") or "").strip() != "base"
 
@@ -130,63 +126,13 @@ def _select_best_checkpoint(
     loss_rows: Sequence[Dict[str, Any]],
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
-    loss_by_key = {_model_key(row): dict(row) for row in loss_rows}
-    candidate_rows = [dict(row) for row in eval_rows if _is_ckpt_row(row)]
-    if not candidate_rows:
-        raise RuntimeError("No checkpoint rows were found in the validation structured evaluation curve.")
-
-    def constraint_pass(row: Dict[str, Any]) -> bool:
-        parse_ok = float(row.get("parse_ok_rate") or float("nan"))
-        protocol_ok = float(row.get("protocol_ok_rate_given_parse_ok") or float("nan"))
-        evidence_ok = float(row.get("evidence_substring_ok_rate_on_pred_answerable") or float("nan"))
-        return (
-            not math.isnan(parse_ok)
-            and not math.isnan(protocol_ok)
-            and not math.isnan(evidence_ok)
-            and parse_ok >= float(args.parse_ok_threshold)
-            and protocol_ok >= float(args.protocol_ok_threshold)
-            and evidence_ok >= float(args.evidence_ok_threshold)
-        )
-
-    passed = [row for row in candidate_rows if constraint_pass(row)]
-    active = passed if passed else candidate_rows
-
-    def sort_key(row: Dict[str, Any]) -> Tuple[float, float, float, float, int]:
-        loss_row = loss_by_key.get(_model_key(row), {})
-        correctness, _ = _safe_metric(row.get("correctness_reviewed_rate_on_pred_answerable"))
-        answerability, _ = _safe_metric(row.get("answerability_accuracy_given_parse_ok"))
-        semantic, _ = _safe_metric(row.get("semantic_yes_rate_on_pred_answerable"))
-        _, loss_value = _safe_metric(loss_row.get("mean_loss"))
-        return (
-            correctness,
-            answerability,
-            semantic,
-            -loss_value,
-            -int(row.get("model_step") or 0),
-        )
-
-    selected = max(active, key=sort_key)
-    selection = {
-        "constraint_satisfied": bool(passed),
-        "selected_model_tag": selected["model_tag"],
-        "selected_model_step": int(selected["model_step"]),
-        "selected_model_path": selected["model_path"],
-        "selected_eval_track": selected.get("eval_track"),
-        "selected_eval_variant": selected.get("eval_variant"),
-        "selection_metrics": {
-            "correctness_reviewed_rate_on_pred_answerable": selected.get("correctness_reviewed_rate_on_pred_answerable"),
-            "correctness_reviewed_rate_all_samples": selected.get("correctness_reviewed_rate_all_samples"),
-            "answerability_accuracy_given_parse_ok": selected.get("answerability_accuracy_given_parse_ok"),
-            "answerability_accuracy_all_samples": selected.get("answerability_accuracy_all_samples"),
-            "semantic_yes_rate_on_pred_answerable": selected.get("semantic_yes_rate_on_pred_answerable"),
-            "semantic_yes_rate_all_samples": selected.get("semantic_yes_rate_all_samples"),
-            "mean_loss": (loss_by_key.get(_model_key(selected), {}) or {}).get("mean_loss"),
-        },
-        "num_candidates": len(candidate_rows),
-        "num_constraint_pass": len(passed),
-        "candidate_rows": candidate_rows,
-    }
-    return selection
+    return _select_best_checkpoint_common(
+        eval_rows=eval_rows,
+        loss_rows=loss_rows,
+        parse_ok_threshold=float(args.parse_ok_threshold),
+        protocol_ok_threshold=float(args.protocol_ok_threshold),
+        evidence_ok_threshold=float(args.evidence_ok_threshold),
+    )
 
 
 def _write_csv_and_jsonl(
@@ -203,21 +149,11 @@ def _write_csv_and_jsonl(
 
 
 def _constraint_pass(row: Dict[str, Any], args: argparse.Namespace) -> bool:
-    """Evaluate hard validation constraints for one structured checkpoint row."""
-
-    try:
-        parse_ok = float(row.get("parse_ok_rate"))
-        protocol_ok = float(row.get("protocol_ok_rate_given_parse_ok"))
-        evidence_ok = float(row.get("evidence_substring_ok_rate_on_pred_answerable"))
-    except (TypeError, ValueError):
-        return False
-    return (
-        not math.isnan(parse_ok)
-        and not math.isnan(protocol_ok)
-        and not math.isnan(evidence_ok)
-        and parse_ok >= float(args.parse_ok_threshold)
-        and protocol_ok >= float(args.protocol_ok_threshold)
-        and evidence_ok >= float(args.evidence_ok_threshold)
+    return _constraint_pass_common(
+        row,
+        parse_ok_threshold=float(args.parse_ok_threshold),
+        protocol_ok_threshold=float(args.protocol_ok_threshold),
+        evidence_ok_threshold=float(args.evidence_ok_threshold),
     )
 
 
@@ -228,56 +164,27 @@ def _build_validation_summary_rows(
     selection: Dict[str, Any],
     args: argparse.Namespace,
 ) -> List[Dict[str, Any]]:
-    """Build the validation-only checkpoint comparison table."""
-
-    loss_by_key = {_model_key(row): dict(row) for row in loss_rows if _is_ckpt_row(row)}
-    selected_path = str(selection.get("selected_model_path") or "")
-    out_rows: List[Dict[str, Any]] = []
-    for row in sorted(
-        [dict(row) for row in eval_rows if _is_ckpt_row(row)],
-        key=lambda item: int(item.get("model_step") or 0),
-    ):
-        loss_row = loss_by_key.get(_model_key(row), {})
-        out_rows.append(
-            {
-                **row,
-                "mean_loss": loss_row.get("mean_loss"),
-                "num_used_rows": loss_row.get("num_used_rows"),
-                "constraint_satisfied": _constraint_pass(row, args),
-                "selected_best": str(row.get("model_path") or "") == selected_path,
-            }
-        )
-    return out_rows
+    return _build_validation_summary_rows_common(
+        eval_rows=eval_rows,
+        loss_rows=loss_rows,
+        selection=selection,
+        parse_ok_threshold=float(args.parse_ok_threshold),
+        protocol_ok_threshold=float(args.protocol_ok_threshold),
+        evidence_ok_threshold=float(args.evidence_ok_threshold),
+    )
 
 
 def _build_test_summary_rows(
     *,
     track_rows: Sequence[Dict[str, Any]],
-    deepeval_rows: Sequence[Dict[str, Any]],
+    detail_rows: Sequence[Dict[str, Any]],
+    deepeval_detail_rows: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Build the final test comparison table with DeepEval merged in."""
-
-    deepeval_by_key = {_model_key(row): dict(row) for row in deepeval_rows}
-    out_rows: List[Dict[str, Any]] = []
-    for row in sorted(
-        [dict(row) for row in track_rows],
-        key=lambda item: (str(item.get("eval_track") or ""), int(item.get("model_step") or 0), str(item.get("eval_variant") or "")),
-    ):
-        deepeval_row = deepeval_by_key.get(_model_key(row), {})
-        out_rows.append(
-            {
-                **row,
-                "deepeval_num_cases": deepeval_row.get("num_cases"),
-                "deepeval_num_scored": deepeval_row.get("num_scored"),
-                "deepeval_num_success_labeled": deepeval_row.get("num_success_labeled"),
-                "deepeval_num_errors": deepeval_row.get("num_errors"),
-                "deepeval_hallucination_score_mean": deepeval_row.get("hallucination_score_mean"),
-                "deepeval_pass_rate": deepeval_row.get("pass_rate"),
-                "deepeval_judge_model": deepeval_row.get("judge_model"),
-                "deepeval_threshold": deepeval_row.get("threshold"),
-            }
-        )
-    return out_rows
+    return _build_test_summary_rows_common(
+        track_rows=track_rows,
+        detail_rows=detail_rows,
+        deepeval_detail_rows=deepeval_detail_rows,
+    )
 
 
 def _grounded_eval_args(
@@ -430,8 +337,8 @@ def _structured_generation_args(
         repetition_penalty=1.0,
         prompt_mode=prompt_mode,
         fewshot_k=args.fewshot_k,
-        retry_on_protocol_fail=(prompt_mode != "infer"),
-        max_attempts=args.protocol_max_attempts if prompt_mode != "infer" else 1,
+        retry_on_protocol_fail=(prompt_mode != "infer") or int(args.structured_max_attempts) > 1,
+        max_attempts=args.protocol_max_attempts if prompt_mode != "infer" else int(args.structured_max_attempts),
         use_chat_template=True,
         enable_thinking=False,
         strip_think_tags=True,
@@ -616,7 +523,8 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
     test_artifacts["best_ckpt_structured_curve"] = str(test_dir / "best_ckpt_structured_curve.csv")
     test_artifacts["best_ckpt_structured_deepeval"] = str(test_dir / "best_ckpt_structured_deepeval_curve.csv")
     test_summary_source_rows: List[Dict[str, Any]] = list(best_test_curve)
-    test_summary_deepeval_rows: List[Dict[str, Any]] = list(best_test_deepeval)
+    test_summary_detail_rows: List[Dict[str, Any]] = list(best_test_details)
+    test_summary_deepeval_detail_rows: List[Dict[str, Any]] = list(best_test_deepeval_details)
 
     base_protocol_test_generations = run_structured_generation(
         _structured_generation_args(
@@ -667,7 +575,8 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
     test_artifacts["base_protocol_curve"] = str(test_dir / "base_protocol_curve.csv")
     test_artifacts["base_protocol_deepeval"] = str(test_dir / "base_protocol_deepeval_curve.csv")
     test_summary_source_rows.extend(base_protocol_test_curve)
-    test_summary_deepeval_rows.extend(base_protocol_test_deepeval)
+    test_summary_detail_rows.extend(base_protocol_test_details)
+    test_summary_deepeval_detail_rows.extend(base_protocol_test_deepeval_details)
 
     for enable_thinking, eval_variant, max_tokens in (
         (False, "no_think", args.base_task_max_new_tokens),
@@ -715,12 +624,14 @@ def run_sft_eval_report(args: argparse.Namespace) -> Dict[str, Any]:
         test_artifacts[f"base_task_{eval_variant}_curve"] = str(test_dir / f"base_task_{eval_variant}_curve.csv")
         test_artifacts[f"base_task_{eval_variant}_deepeval"] = str(test_dir / f"base_task_{eval_variant}_deepeval_curve.csv")
         test_summary_source_rows.extend(task_curve)
-        test_summary_deepeval_rows.extend(task_deepeval)
+        test_summary_detail_rows.extend(task_details)
+        test_summary_deepeval_detail_rows.extend(task_deepeval_details)
 
     test_summary_path = report_dir / "test_summary.csv"
     test_summary_rows = _build_test_summary_rows(
         track_rows=test_summary_source_rows,
-        deepeval_rows=test_summary_deepeval_rows,
+        detail_rows=test_summary_detail_rows,
+        deepeval_detail_rows=test_summary_deepeval_detail_rows,
     )
     write_csv(test_summary_rows, str(test_summary_path))
 

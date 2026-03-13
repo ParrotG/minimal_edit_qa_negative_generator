@@ -385,8 +385,12 @@ def _evaluate_one_model(
     num_rows = len(prepared)
     num_parse_ok = 0
     num_protocol_ok = 0
-    answerability_correct = 0
-    predicted_answerable_total = 0
+    num_usable = 0
+    num_source_answerable = 0
+    num_source_unanswerable = 0
+    num_e2e_answerability_success = 0
+    num_answerable_gate = 0
+    num_usable_pred_answerable = 0
     evidence_ok = 0
     correctness_strict_ok = 0
     correctness_matcher_review_total = 0
@@ -398,19 +402,26 @@ def _evaluate_one_model(
     generation_failed_count = 0
     attempt_total = 0
     success_on_first_attempt = 0
+    num_e2e_reviewed_correctness_success = 0
+    num_e2e_semantic_success = 0
+    num_answerable_reviewed_correctness_success = 0
+    num_answerable_semantic_success = 0
+    num_unanswerable_success = 0
 
-    confidence_pairs_answerability_x: List[float] = []
-    confidence_pairs_answerability_y: List[float] = []
-    confidence_pairs_correctness_x: List[float] = []
-    confidence_pairs_correctness_y: List[float] = []
-    confidence_pairs_correctness_reviewed_x: List[float] = []
-    confidence_pairs_correctness_reviewed_y: List[float] = []
-    confidence_pairs_semantic_yes_x: List[float] = []
-    confidence_pairs_semantic_yes_y: List[float] = []
+    confidence_pairs_reviewed_x: List[float] = []
+    confidence_pairs_reviewed_y: List[float] = []
+    confidence_pairs_semantic_x: List[float] = []
+    confidence_pairs_semantic_y: List[float] = []
     confidence_pairs_semantic_margin_x: List[float] = []
     confidence_pairs_semantic_margin_y: List[float] = []
-    confidence_bucket_gated = _empty_confidence_bucket()
-    confidence_bucket_all = _empty_confidence_bucket(include_missing=True)
+    confidence_bucket = {
+        label: {
+            "e2e_reviewed_correctness": [],
+            "e2e_semantic": [],
+            "semantic_margin": [],
+        }
+        for label in ("high", "medium", "low")
+    }
 
     details: List[Dict[str, Any]] = []
     for item in prepared:
@@ -433,24 +444,34 @@ def _evaluate_one_model(
         if protocol_passed_from_generation and attempt_count == 1:
             success_on_first_attempt += 1
 
+        protocol_ok = bool(protocol_report and protocol_report.ok)
+        usable = bool(parse_ok and protocol_ok)
         if parse_ok:
             num_parse_ok += 1
-            num_protocol_ok += int(bool(protocol_report and protocol_report.ok))
+            num_protocol_ok += int(protocol_ok)
+        num_usable += int(usable)
 
         pred_answerability = "" if output is None else output.answerability.value
         is_pred_answerable = pred_answerability == "answerable"
+        source_is_answerable = gold_answerability == "answerable"
+        source_is_unanswerable = gold_answerability == "unanswerable"
+        num_source_answerable += int(source_is_answerable)
+        num_source_unanswerable += int(source_is_unanswerable)
 
         answerability_match = None
         if parse_ok and gold_answerability:
             answerability_match = pred_answerability == gold_answerability
-            answerability_correct += int(bool(answerability_match))
+        e2e_answerability_success = bool(usable and answerability_match)
+        num_e2e_answerability_success += int(e2e_answerability_success)
 
         reviewed_ok: Optional[bool] = None
-        if parse_ok and is_pred_answerable:
-            predicted_answerable_total += 1
+        entered_answerable_checks = bool(source_is_answerable and e2e_answerability_success)
+        num_answerable_gate += int(entered_answerable_checks)
+        if usable and is_pred_answerable:
+            num_usable_pred_answerable += 1
             if evidence_report is not None:
                 evidence_ok += int(evidence_report.ok)
-            if correctness_report is not None:
+            if entered_answerable_checks and correctness_report is not None:
                 correctness_strict_ok += int(correctness_report.ok)
                 reviewed_ok = bool(correctness_report.ok)
                 if not correctness_report.ok and correctness_matcher_report is not None:
@@ -458,59 +479,43 @@ def _evaluate_one_model(
                     correctness_matcher_positive += int(bool(correctness_matcher_report.ok))
                     reviewed_ok = bool(correctness_matcher_report.ok)
                 correctness_reviewed_ok += int(bool(reviewed_ok))
-            if enable_semantics and item["should_run_semantics"] and semantics_report.decision is not None:
+            if entered_answerable_checks and enable_semantics and item["should_run_semantics"] and semantics_report.decision is not None:
                 semantic_evaluated_total += 1
                 semantic_yes += int(semantics_report.decision == "yes")
                 if semantics_report.margin is not None:
                     semantic_margins.append(float(semantics_report.margin))
+        evidence_substring_success = None if not (usable and is_pred_answerable) else bool(evidence_report and evidence_report.ok)
+        e2e_reviewed_correctness_success = False
+        e2e_semantic_success = False
+        if source_is_unanswerable:
+            e2e_reviewed_correctness_success = e2e_answerability_success
+            e2e_semantic_success = e2e_answerability_success
+            num_unanswerable_success += int(e2e_answerability_success)
+        elif source_is_answerable:
+            e2e_reviewed_correctness_success = bool(entered_answerable_checks and reviewed_ok)
+            e2e_semantic_success = bool(entered_answerable_checks and semantics_report.decision == "yes")
+            num_answerable_reviewed_correctness_success += int(e2e_reviewed_correctness_success)
+            num_answerable_semantic_success += int(e2e_semantic_success)
+        num_e2e_reviewed_correctness_success += int(e2e_reviewed_correctness_success)
+        num_e2e_semantic_success += int(e2e_semantic_success)
 
         parsed_payload = None if output is None else output.model_dump(mode="json")
         confidence_rank = _extract_confidence_rank(parsed_payload)
         confidence_label = "" if output is None else output.confidence.value
-        confidence_bucket_label = confidence_label if confidence_label in confidence_bucket_all else "missing"
-
-        answerability_all_value = 1.0 if bool(answerability_match) else 0.0
-        correctness_strict_all_value = 1.0 if correctness_report is not None and correctness_report.ok else 0.0
-        correctness_reviewed_all_value = 1.0 if bool(reviewed_ok) else 0.0
-        semantic_yes_all_value = 1.0 if semantics_report.decision == "yes" else 0.0
-        if semantics_report.margin is not None:
-            confidence_bucket_all[confidence_bucket_label]["semantic_margin"].append(float(semantics_report.margin))
-        confidence_bucket_all[confidence_bucket_label]["answerability"].append(answerability_all_value)
-        confidence_bucket_all[confidence_bucket_label]["correctness"].append(correctness_strict_all_value)
-        confidence_bucket_all[confidence_bucket_label]["correctness_reviewed"].append(correctness_reviewed_all_value)
-        confidence_bucket_all[confidence_bucket_label]["semantic_yes"].append(semantic_yes_all_value)
-
-        if confidence_rank is not None and answerability_match is not None:
-            confidence_pairs_answerability_x.append(float(confidence_rank))
-            confidence_pairs_answerability_y.append(1.0 if answerability_match else 0.0)
-            if confidence_label in confidence_bucket_gated:
-                confidence_bucket_gated[confidence_label]["answerability"].append(1.0 if answerability_match else 0.0)
-
-        if parse_ok and is_pred_answerable and confidence_rank is not None:
-            if correctness_report is not None:
-                correctness_value = 1.0 if correctness_report.ok else 0.0
-                confidence_pairs_correctness_x.append(float(confidence_rank))
-                confidence_pairs_correctness_y.append(correctness_value)
-                if confidence_label in confidence_bucket_gated:
-                    confidence_bucket_gated[confidence_label]["correctness"].append(correctness_value)
-                if reviewed_ok is not None:
-                    reviewed_value = 1.0 if reviewed_ok else 0.0
-                    confidence_pairs_correctness_reviewed_x.append(float(confidence_rank))
-                    confidence_pairs_correctness_reviewed_y.append(reviewed_value)
-                    if confidence_label in confidence_bucket_gated:
-                        confidence_bucket_gated[confidence_label]["correctness_reviewed"].append(reviewed_value)
-            if enable_semantics and item["should_run_semantics"] and semantics_report.decision in {"yes", "no"}:
-                semantic_yes_value = 1.0 if semantics_report.decision == "yes" else 0.0
-                confidence_pairs_semantic_yes_x.append(float(confidence_rank))
-                confidence_pairs_semantic_yes_y.append(semantic_yes_value)
-                if confidence_label in confidence_bucket_gated:
-                    confidence_bucket_gated[confidence_label]["semantic_yes"].append(semantic_yes_value)
-            if enable_semantics and item["should_run_semantics"] and semantics_report.margin is not None:
+        if usable and gold_answerability and confidence_rank is not None and confidence_label in confidence_bucket:
+            reviewed_value = 1.0 if e2e_reviewed_correctness_success else 0.0
+            semantic_value = 1.0 if e2e_semantic_success else 0.0
+            confidence_pairs_reviewed_x.append(float(confidence_rank))
+            confidence_pairs_reviewed_y.append(reviewed_value)
+            confidence_pairs_semantic_x.append(float(confidence_rank))
+            confidence_pairs_semantic_y.append(semantic_value)
+            confidence_bucket[confidence_label]["e2e_reviewed_correctness"].append(reviewed_value)
+            confidence_bucket[confidence_label]["e2e_semantic"].append(semantic_value)
+            if semantics_report.margin is not None:
                 margin_value = float(semantics_report.margin)
                 confidence_pairs_semantic_margin_x.append(float(confidence_rank))
                 confidence_pairs_semantic_margin_y.append(margin_value)
-                if confidence_label in confidence_bucket_gated:
-                    confidence_bucket_gated[confidence_label]["semantic_margin"].append(margin_value)
+                confidence_bucket[confidence_label]["semantic_margin"].append(margin_value)
 
         details.append(
             {
@@ -529,11 +534,19 @@ def _evaluate_one_model(
                 "attempt_count": attempt_count,
                 "protocol_passed_from_generation": protocol_passed_from_generation,
                 "generation_failed": generation_failed,
+                "usable": usable,
                 "pred_answerability": pred_answerability,
                 "answerability_match": answerability_match,
+                "entered_answerable_checks": entered_answerable_checks,
+                "e2e_answerability_success": e2e_answerability_success,
+                "e2e_reviewed_correctness_success": e2e_reviewed_correctness_success,
+                "e2e_semantic_success": e2e_semantic_success,
+                "source_is_answerable": source_is_answerable,
+                "source_is_unanswerable": source_is_unanswerable,
                 "protocol_ok": None if protocol_report is None else protocol_report.ok,
                 "protocol_issues": [] if protocol_report is None else list(protocol_report.issues),
                 "evidence_ok": None if evidence_report is None else evidence_report.ok,
+                "evidence_substring_success": evidence_substring_success,
                 "evidence_issues": [] if evidence_report is None else list(evidence_report.issues),
                 "correctness_ok": None if correctness_report is None else correctness_report.ok,
                 "correctness_exact_match": None if correctness_report is None else correctness_report.exact_match,
@@ -555,154 +568,93 @@ def _evaluate_one_model(
             }
         )
 
+    reviewed_resolution, reviewed_resolution_count = _normalized_resolution(
+        {label: values["e2e_reviewed_correctness"] for label, values in confidence_bucket.items()}
+    )
+    semantic_resolution, semantic_resolution_count = _normalized_resolution(
+        {label: values["e2e_semantic"] for label, values in confidence_bucket.items()}
+    )
     metrics = {
         "num_rows": num_rows,
         "num_parse_ok": num_parse_ok,
         "parse_ok_rate": _safe_rate(num_parse_ok, num_rows),
         "num_protocol_ok": num_protocol_ok,
         "protocol_ok_rate_given_parse_ok": _safe_rate(num_protocol_ok, num_parse_ok),
-        "protocol_ok_rate_all_samples": _safe_rate(num_protocol_ok, num_rows),
-        "answerability_total": num_parse_ok,
-        "answerability_correct": answerability_correct,
-        "answerability_accuracy_given_parse_ok": _safe_rate(answerability_correct, num_parse_ok),
-        "answerability_accuracy_all_samples": _safe_rate(answerability_correct, num_rows),
-        "predicted_answerable_total": predicted_answerable_total,
-        "evidence_total": predicted_answerable_total,
-        "evidence_substring_ok": evidence_ok,
-        "evidence_substring_ok_rate_on_pred_answerable": _safe_rate(evidence_ok, predicted_answerable_total),
-        "evidence_substring_ok_rate_all_samples": _safe_rate(evidence_ok, num_rows),
-        "correctness_total": predicted_answerable_total,
+        "num_usable": num_usable,
+        "usable_rate": _safe_rate(num_usable, num_rows),
+        "num_source_answerable": num_source_answerable,
+        "num_source_unanswerable": num_source_unanswerable,
+        "num_e2e_answerability_success": num_e2e_answerability_success,
+        "e2e_answerability_accuracy": _safe_rate(num_e2e_answerability_success, num_rows),
+        "num_usable_pred_answerable": num_usable_pred_answerable,
+        "evidence_substring_success_count": evidence_ok,
+        "evidence_substring_rate_on_usable_pred_answerable": _safe_rate(evidence_ok, num_usable_pred_answerable),
+        "answerable_gate_total": num_answerable_gate,
         "correctness_strict_ok": correctness_strict_ok,
-        "correctness_strict_rate_on_pred_answerable": _safe_rate(correctness_strict_ok, predicted_answerable_total),
-        "correctness_strict_rate_all_samples": _safe_rate(correctness_strict_ok, num_rows),
         "correctness_matcher_review_total": correctness_matcher_review_total,
         "correctness_matcher_positive": correctness_matcher_positive,
         "correctness_matcher_positive_rate": _safe_rate(correctness_matcher_positive, correctness_matcher_review_total),
         "correctness_reviewed_ok": correctness_reviewed_ok,
-        "correctness_reviewed_rate_on_pred_answerable": _safe_rate(correctness_reviewed_ok, predicted_answerable_total),
-        "correctness_reviewed_rate_all_samples": _safe_rate(correctness_reviewed_ok, num_rows),
+        "num_e2e_reviewed_correctness_success": num_e2e_reviewed_correctness_success,
+        "e2e_reviewed_correctness_success_rate": _safe_rate(num_e2e_reviewed_correctness_success, num_rows),
         "semantic_total": semantic_evaluated_total,
         "semantic_yes": semantic_yes,
-        "semantic_yes_rate_on_pred_answerable": _safe_rate(semantic_yes, predicted_answerable_total),
-        "semantic_yes_rate_all_samples": _safe_rate(semantic_yes, num_rows),
+        "semantic_evaluated_rate_on_answerable_gate": _safe_rate(semantic_evaluated_total, num_answerable_gate),
+        "num_e2e_semantic_success": num_e2e_semantic_success,
+        "e2e_semantic_success_rate": _safe_rate(num_e2e_semantic_success, num_rows),
+        "num_answerable_reviewed_correctness_success": num_answerable_reviewed_correctness_success,
+        "answerable_reviewed_correctness_success_rate": _safe_rate(num_answerable_reviewed_correctness_success, num_source_answerable),
+        "num_answerable_semantic_success": num_answerable_semantic_success,
+        "answerable_semantic_success_rate": _safe_rate(num_answerable_semantic_success, num_source_answerable),
+        "num_unanswerable_success": num_unanswerable_success,
+        "unanswerable_success_rate": _safe_rate(num_unanswerable_success, num_source_unanswerable),
         "semantic_margin_mean": _safe_mean(semantic_margins),
         "generation_failed_count": generation_failed_count,
         "generation_failed_rate": _safe_rate(generation_failed_count, num_rows),
         "avg_attempt_count": float(attempt_total / num_rows) if num_rows > 0 else float("nan"),
         "success_on_first_attempt_rate": _safe_rate(success_on_first_attempt, num_rows),
         "supporting_fact_check_enabled": False,
+        "e2e_confidence_resolution_reviewed_correctness": reviewed_resolution,
+        "e2e_confidence_resolution_reviewed_correctness_num_rows": reviewed_resolution_count,
+        "e2e_confidence_resolution_semantic": semantic_resolution,
+        "e2e_confidence_resolution_semantic_num_rows": semantic_resolution_count,
     }
-
-    answerability_resolution_gated, answerability_resolution_gated_count = _normalized_resolution(
-        {label: values["answerability"] for label, values in confidence_bucket_gated.items()}
-    )
-    answerability_resolution_all, answerability_resolution_all_count = _normalized_resolution(
-        {label: values["answerability"] for label, values in confidence_bucket_all.items()}
-    )
-    correctness_reviewed_resolution_gated, correctness_reviewed_resolution_gated_count = _normalized_resolution(
-        {label: values["correctness_reviewed"] for label, values in confidence_bucket_gated.items()}
-    )
-    correctness_reviewed_resolution_all, correctness_reviewed_resolution_all_count = _normalized_resolution(
-        {label: values["correctness_reviewed"] for label, values in confidence_bucket_all.items()}
-    )
-    semantic_yes_resolution_gated, semantic_yes_resolution_gated_count = _normalized_resolution(
-        {label: values["semantic_yes"] for label, values in confidence_bucket_gated.items()}
-    )
-    semantic_yes_resolution_all, semantic_yes_resolution_all_count = _normalized_resolution(
-        {label: values["semantic_yes"] for label, values in confidence_bucket_all.items()}
-    )
-
-    metrics.update(
-        {
-            "confidence_resolution_answerability_given_parse_ok": answerability_resolution_gated,
-            "confidence_resolution_answerability_given_parse_ok_num_rows": answerability_resolution_gated_count,
-            "confidence_resolution_answerability_all_samples": answerability_resolution_all,
-            "confidence_resolution_answerability_all_samples_num_rows": answerability_resolution_all_count,
-            "confidence_resolution_correctness_reviewed_on_pred_answerable": correctness_reviewed_resolution_gated,
-            "confidence_resolution_correctness_reviewed_on_pred_answerable_num_rows": correctness_reviewed_resolution_gated_count,
-            "confidence_resolution_correctness_reviewed_all_samples": correctness_reviewed_resolution_all,
-            "confidence_resolution_correctness_reviewed_all_samples_num_rows": correctness_reviewed_resolution_all_count,
-            "confidence_resolution_semantic_yes_on_pred_answerable": semantic_yes_resolution_gated,
-            "confidence_resolution_semantic_yes_on_pred_answerable_num_rows": semantic_yes_resolution_gated_count,
-            "confidence_resolution_semantic_yes_all_samples": semantic_yes_resolution_all,
-            "confidence_resolution_semantic_yes_all_samples_num_rows": semantic_yes_resolution_all_count,
-        }
-    )
 
     confidence_metrics = {
         "correlations": {
-            "answerability": {
-                "pearson": _pearson(confidence_pairs_answerability_x, confidence_pairs_answerability_y),
-                "spearman": _spearman(confidence_pairs_answerability_x, confidence_pairs_answerability_y),
-                "count": len(confidence_pairs_answerability_x),
+            "e2e_reviewed_correctness": {
+                "pearson": _pearson(confidence_pairs_reviewed_x, confidence_pairs_reviewed_y),
+                "spearman": _spearman(confidence_pairs_reviewed_x, confidence_pairs_reviewed_y),
+                "count": len(confidence_pairs_reviewed_x),
             },
-            "correctness_strict_on_pred_answerable": {
-                "pearson": _pearson(confidence_pairs_correctness_x, confidence_pairs_correctness_y),
-                "spearman": _spearman(confidence_pairs_correctness_x, confidence_pairs_correctness_y),
-                "count": len(confidence_pairs_correctness_x),
+            "e2e_semantic": {
+                "pearson": _pearson(confidence_pairs_semantic_x, confidence_pairs_semantic_y),
+                "spearman": _spearman(confidence_pairs_semantic_x, confidence_pairs_semantic_y),
+                "count": len(confidence_pairs_semantic_x),
             },
-            "correctness_reviewed_on_pred_answerable": {
-                "pearson": _pearson(confidence_pairs_correctness_reviewed_x, confidence_pairs_correctness_reviewed_y),
-                "spearman": _spearman(confidence_pairs_correctness_reviewed_x, confidence_pairs_correctness_reviewed_y),
-                "count": len(confidence_pairs_correctness_reviewed_x),
-            },
-            "semantic_yes_on_pred_answerable": {
-                "pearson": _pearson(confidence_pairs_semantic_yes_x, confidence_pairs_semantic_yes_y),
-                "spearman": _spearman(confidence_pairs_semantic_yes_x, confidence_pairs_semantic_yes_y),
-                "count": len(confidence_pairs_semantic_yes_x),
-            },
-            "semantic_margin_on_pred_answerable": {
+            "semantic_margin": {
                 "pearson": _pearson(confidence_pairs_semantic_margin_x, confidence_pairs_semantic_margin_y),
                 "spearman": _spearman(confidence_pairs_semantic_margin_x, confidence_pairs_semantic_margin_y),
                 "count": len(confidence_pairs_semantic_margin_x),
             },
         },
-        "buckets_given_parse_ok_or_pred_answerable": {
+        "buckets": {
             label: {
-                "count": int(len(values["answerability"])),
-                "answerability_accuracy_given_parse_ok": _safe_mean(values["answerability"]),
-                "correctness_strict_rate_on_pred_answerable": _safe_mean(values["correctness"]),
-                "correctness_reviewed_rate_on_pred_answerable": _safe_mean(values["correctness_reviewed"]),
-                "semantic_yes_rate_on_pred_answerable": _safe_mean(values["semantic_yes"]),
-                "semantic_margin_mean_on_pred_answerable": _safe_mean(values["semantic_margin"]),
+                "count": int(len(values["e2e_reviewed_correctness"])),
+                "e2e_reviewed_correctness_success_rate": _safe_mean(values["e2e_reviewed_correctness"]),
+                "e2e_semantic_success_rate": _safe_mean(values["e2e_semantic"]),
+                "semantic_margin_mean": _safe_mean(values["semantic_margin"]),
             }
-            for label, values in confidence_bucket_gated.items()
-        },
-        "buckets_all_samples": {
-            label: {
-                "count": int(len(values["answerability"])),
-                "answerability_accuracy_all_samples": _safe_mean(values["answerability"]),
-                "correctness_strict_rate_all_samples": _safe_mean(values["correctness"]),
-                "correctness_reviewed_rate_all_samples": _safe_mean(values["correctness_reviewed"]),
-                "semantic_yes_rate_all_samples": _safe_mean(values["semantic_yes"]),
-                "semantic_margin_mean_observed": _safe_mean(values["semantic_margin"]),
-            }
-            for label, values in confidence_bucket_all.items()
+            for label, values in confidence_bucket.items()
         },
         "resolution": {
-            "answerability_given_parse_ok": {
-                "normalized_resolution": answerability_resolution_gated,
-                "eligible_count": answerability_resolution_gated_count,
+            "e2e_reviewed_correctness": {
+                "normalized_resolution": reviewed_resolution,
+                "eligible_count": reviewed_resolution_count,
             },
-            "answerability_all_samples": {
-                "normalized_resolution": answerability_resolution_all,
-                "eligible_count": answerability_resolution_all_count,
-            },
-            "correctness_reviewed_on_pred_answerable": {
-                "normalized_resolution": correctness_reviewed_resolution_gated,
-                "eligible_count": correctness_reviewed_resolution_gated_count,
-            },
-            "correctness_reviewed_all_samples": {
-                "normalized_resolution": correctness_reviewed_resolution_all,
-                "eligible_count": correctness_reviewed_resolution_all_count,
-            },
-            "semantic_yes_on_pred_answerable": {
-                "normalized_resolution": semantic_yes_resolution_gated,
-                "eligible_count": semantic_yes_resolution_gated_count,
-            },
-            "semantic_yes_all_samples": {
-                "normalized_resolution": semantic_yes_resolution_all,
-                "eligible_count": semantic_yes_resolution_all_count,
+            "e2e_semantic": {
+                "normalized_resolution": semantic_resolution,
+                "eligible_count": semantic_resolution_count,
             },
         },
     }

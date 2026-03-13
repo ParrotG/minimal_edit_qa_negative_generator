@@ -163,6 +163,9 @@ python -m model_eval.generate_structured_answers \
   --data_path data/sft_dataset \
   --split validation \
   --lora_ckpt_list_path ckpt/sft_lora_groundedqa \
+  --retry_on_protocol_fail \
+  --max_attempts 2 \
+  --temperature 0.2 \
   --out_jsonl outputs/model_eval/validation/sft_val_structured_generations.jsonl
 ```
 
@@ -174,6 +177,14 @@ python -m model_eval.eval_grounded_qa \
   --confidence_out outputs/model_eval/validation/sft_val_confidence_analysis.json
 ```
 
+```bash
+python -m model_eval.build_validation_summary \
+  --eval_curve_path outputs/model_eval/validation/sft_val_structured_curve.csv \
+  --loss_curve_path outputs/model_eval/validation/sft_val_loss_curve.csv \
+  --out_csv outputs/model_eval/validation/validation_summary.csv \
+  --selection_out outputs/model_eval/validation/selection.json
+```
+
 Test split, best checkpoint after manual selection:
 
 ```bash
@@ -181,6 +192,9 @@ python -m model_eval.generate_structured_answers \
   --data_path data/sft_dataset \
   --split test \
   --lora_ckpt_path ckpt/sft_lora_groundedqa/checkpoint-XXX \
+  --retry_on_protocol_fail \
+  --max_attempts 2 \
+  --temperature 0.2 \
   --out_jsonl outputs/model_eval/test/best_ckpt_structured_generations.jsonl
 ```
 
@@ -208,6 +222,9 @@ python -m model_eval.generate_structured_answers \
   --split test \
   --include_base \
   --prompt_mode teacher_fewshot \
+  --retry_on_protocol_fail \
+  --max_attempts 3 \
+  --temperature 0.2 \
   --out_jsonl outputs/model_eval/test/base_protocol_generations.jsonl
 ```
 
@@ -279,6 +296,23 @@ python -m model_eval.eval_deepeval_hallucination \
   --details_out outputs/model_eval/test/base_task_think_deepeval_details.jsonl
 ```
 
+```bash
+python -m model_eval.build_test_summary \
+  --curve_path outputs/model_eval/test/best_ckpt_structured_curve.csv \
+  --curve_path outputs/model_eval/test/base_protocol_curve.csv \
+  --curve_path outputs/model_eval/test/base_task_no_think_curve.csv \
+  --curve_path outputs/model_eval/test/base_task_think_curve.csv \
+  --details_path outputs/model_eval/test/best_ckpt_structured_details.jsonl \
+  --details_path outputs/model_eval/test/base_protocol_details.jsonl \
+  --details_path outputs/model_eval/test/base_task_no_think_details.jsonl \
+  --details_path outputs/model_eval/test/base_task_think_details.jsonl \
+  --deepeval_details_path outputs/model_eval/test/best_ckpt_structured_deepeval_details.jsonl \
+  --deepeval_details_path outputs/model_eval/test/base_protocol_deepeval_details.jsonl \
+  --deepeval_details_path outputs/model_eval/test/base_task_no_think_deepeval_details.jsonl \
+  --deepeval_details_path outputs/model_eval/test/base_task_think_deepeval_details.jsonl \
+  --out_csv outputs/model_eval/test/test_summary.csv
+```
+
 ## Optional Calibration
 
 Calibration is optional. The repository already ships default judge settings, but you can recalibrate the task-level NLI and answer-equivalence judges against human annotations when needed.
@@ -302,11 +336,13 @@ The package name is `calibrate`. The previous `cablibrate` spelling was a typo a
 
 ```bash
 python -m calibrate.build_annotation_pack \
-  --data_path outputs/model_eval/final_report/validation/sft_val_structured_details.jsonl \
-  --data_path outputs/model_eval/final_report/test/base_protocol_details.jsonl \
-  --task_types nli_structured \
-  --out_jsonl outputs/calibration/annotation_pack_structured.jsonl \
-  --metrics_out outputs/calibration/annotation_pack_structured_metrics.json
+  --data_path outputs/model_eval/validation/sft_val_structured_details.jsonl \
+  --data_path outputs/model_eval/test/base_protocol_details.jsonl \
+  --data_path outputs/model_eval/test/base_task_think_details.jsonl \
+  --data_path outputs/model_eval/test/base_task_no_think_details.jsonl \
+  --task_types nli_structured,nli_flat,matcher \
+  --out_jsonl outputs/calibration/annotation_pack.jsonl \
+  --metrics_out outputs/calibration/annotation_pack_metrics.json
 ```
 
 ```bash

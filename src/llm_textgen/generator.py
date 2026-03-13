@@ -167,6 +167,7 @@ class UnifiedTextGenerator:
         return (
             "Use only the provided knowledge to answer the question.\n"
             "If the knowledge is insufficient, answer exactly: I do not know based on the knowledge.\n"
+            "Do not repeat or paraphrase this instruction in the answer.\n"
             f"{premise}\n"
             "Answer: "
         )

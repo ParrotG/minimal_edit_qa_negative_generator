@@ -35,6 +35,7 @@ try:
     from model_eval.generate_structured_answers import _build_prompt, _generate_batch_with_retry
     from model_eval.merge_eval_curves import _project_rows
     from model_eval.run_sft_eval_report import _select_best_checkpoint, run_sft_eval_report
+    from model_eval.summary_builders import build_test_summary_rows, build_validation_summary_rows
     from llm_textgen.api_client import ApiGenerationConfig, ApiGenerationResult, OpenAICompatibleTextGenerator
     from llm_textgen.generator import UnifiedTextGenerator
     from project_config import PROJECT_SETTINGS
@@ -67,6 +68,8 @@ except ModuleNotFoundError:  # pragma: no cover
     _project_rows = None
     _select_best_checkpoint = None
     run_sft_eval_report = None
+    build_test_summary_rows = None
+    build_validation_summary_rows = None
     ApiGenerationConfig = None
     ApiGenerationResult = None
     OpenAICompatibleTextGenerator = None
@@ -111,6 +114,8 @@ def _write_jsonl(path: Path, rows) -> None:
             _project_rows,
             _select_best_checkpoint,
             run_sft_eval_report,
+            build_test_summary_rows,
+            build_validation_summary_rows,
             ApiGenerationConfig,
             ApiGenerationResult,
             OpenAICompatibleTextGenerator,
@@ -360,15 +365,13 @@ class ModelEvalRefactorTests(unittest.TestCase):
 
         self.assertAlmostEqual(metrics["parse_ok_rate"], 0.5)
         self.assertAlmostEqual(metrics["protocol_ok_rate_given_parse_ok"], 1.0)
-        self.assertAlmostEqual(metrics["protocol_ok_rate_all_samples"], 0.5)
-        self.assertAlmostEqual(metrics["answerability_accuracy_given_parse_ok"], 1.0)
-        self.assertAlmostEqual(metrics["answerability_accuracy_all_samples"], 0.5)
-        self.assertAlmostEqual(metrics["evidence_substring_ok_rate_on_pred_answerable"], 1.0)
-        self.assertAlmostEqual(metrics["evidence_substring_ok_rate_all_samples"], 0.5)
-        self.assertAlmostEqual(metrics["correctness_reviewed_rate_on_pred_answerable"], 1.0)
-        self.assertAlmostEqual(metrics["correctness_reviewed_rate_all_samples"], 0.5)
-        self.assertAlmostEqual(metrics["semantic_yes_rate_on_pred_answerable"], 1.0)
-        self.assertAlmostEqual(metrics["semantic_yes_rate_all_samples"], 0.5)
+        self.assertAlmostEqual(metrics["usable_rate"], 0.5)
+        self.assertAlmostEqual(metrics["e2e_answerability_accuracy"], 0.5)
+        self.assertAlmostEqual(metrics["evidence_substring_rate_on_usable_pred_answerable"], 1.0)
+        self.assertAlmostEqual(metrics["e2e_reviewed_correctness_success_rate"], 0.5)
+        self.assertAlmostEqual(metrics["e2e_semantic_success_rate"], 0.5)
+        self.assertAlmostEqual(metrics["answerable_reviewed_correctness_success_rate"], 0.5)
+        self.assertAlmostEqual(metrics["answerable_semantic_success_rate"], 0.5)
 
     def test_flat_eval_reports_gated_and_all_sample_rates(self) -> None:
         class DummyMatcher:
@@ -449,13 +452,13 @@ class ModelEvalRefactorTests(unittest.TestCase):
             )
 
         self.assertAlmostEqual(metrics["extraction_parse_ok_rate"], 0.5)
-        self.assertAlmostEqual(metrics["answerability_accuracy_given_extraction_parse_ok"], 1.0)
-        self.assertAlmostEqual(metrics["answerability_accuracy_all_samples"], 0.5)
-        self.assertAlmostEqual(metrics["content_eval_rate_all_samples"], 0.5)
-        self.assertAlmostEqual(metrics["correctness_reviewed_rate_on_entered_content_eval"], 1.0)
-        self.assertAlmostEqual(metrics["correctness_reviewed_rate_all_samples"], 0.5)
-        self.assertAlmostEqual(metrics["semantic_yes_rate_on_entered_content_eval"], 1.0)
-        self.assertAlmostEqual(metrics["semantic_yes_rate_all_samples"], 0.5)
+        self.assertAlmostEqual(metrics["usable_rate"], 0.5)
+        self.assertAlmostEqual(metrics["e2e_answerability_accuracy"], 0.5)
+        self.assertAlmostEqual(metrics["content_eval_gate_rate"], 0.5)
+        self.assertAlmostEqual(metrics["e2e_reviewed_correctness_success_rate"], 0.5)
+        self.assertAlmostEqual(metrics["e2e_semantic_success_rate"], 0.5)
+        self.assertAlmostEqual(metrics["answerable_reviewed_correctness_success_rate"], 0.5)
+        self.assertAlmostEqual(metrics["answerable_semantic_success_rate"], 0.5)
 
     def test_transformer_matcher_reviews_batch_with_mocked_backend(self) -> None:
         class DummyMatcher:
@@ -877,10 +880,10 @@ class ModelEvalRefactorTests(unittest.TestCase):
                     "eval_variant": "checkpoint",
                     "parse_ok_rate": 0.94,
                     "protocol_ok_rate_given_parse_ok": 0.99,
-                    "evidence_substring_ok_rate_on_pred_answerable": 0.99,
-                    "correctness_reviewed_rate_on_pred_answerable": 0.95,
-                    "answerability_accuracy_given_parse_ok": 0.95,
-                    "semantic_yes_rate_on_pred_answerable": 0.90,
+                    "evidence_substring_rate_on_usable_pred_answerable": 0.99,
+                    "e2e_reviewed_correctness_success_rate": 0.95,
+                    "e2e_answerability_accuracy": 0.95,
+                    "e2e_semantic_success_rate": 0.90,
                 },
                 {
                     "model_tag": "checkpoint-200",
@@ -890,10 +893,10 @@ class ModelEvalRefactorTests(unittest.TestCase):
                     "eval_variant": "checkpoint",
                     "parse_ok_rate": 0.97,
                     "protocol_ok_rate_given_parse_ok": 0.99,
-                    "evidence_substring_ok_rate_on_pred_answerable": 0.97,
-                    "correctness_reviewed_rate_on_pred_answerable": 0.90,
-                    "answerability_accuracy_given_parse_ok": 0.96,
-                    "semantic_yes_rate_on_pred_answerable": 0.89,
+                    "evidence_substring_rate_on_usable_pred_answerable": 0.97,
+                    "e2e_reviewed_correctness_success_rate": 0.90,
+                    "e2e_answerability_accuracy": 0.96,
+                    "e2e_semantic_success_rate": 0.89,
                 },
             ],
             loss_rows=[
@@ -922,6 +925,111 @@ class ModelEvalRefactorTests(unittest.TestCase):
         )
         self.assertTrue(selection["constraint_satisfied"])
         self.assertEqual(selection["selected_model_path"], "ckpt-200")
+
+    def test_build_validation_summary_rows_marks_selected_and_constraints(self) -> None:
+        eval_rows = [
+            {
+                "model_tag": "checkpoint-100",
+                "model_step": 100,
+                "model_path": "ckpt-100",
+                "eval_track": "sft_structured",
+                "eval_variant": "checkpoint",
+                "parse_ok_rate": 0.99,
+                "protocol_ok_rate_given_parse_ok": 0.99,
+                "evidence_substring_rate_on_usable_pred_answerable": 0.99,
+                "e2e_reviewed_correctness_success_rate": 0.8,
+                "e2e_answerability_accuracy": 0.8,
+                "e2e_semantic_success_rate": 0.8,
+            }
+        ]
+        loss_rows = [
+            {
+                "model_tag": "checkpoint-100",
+                "model_step": 100,
+                "model_path": "ckpt-100",
+                "eval_track": "sft_structured",
+                "eval_variant": "checkpoint",
+                "mean_loss": 1.1,
+                "num_used_rows": 32,
+            }
+        ]
+        selection = {
+            "selected_model_path": "ckpt-100",
+        }
+        rows = build_validation_summary_rows(
+            eval_rows=eval_rows,
+            loss_rows=loss_rows,
+            selection=selection,
+            parse_ok_threshold=0.95,
+            protocol_ok_threshold=0.98,
+            evidence_ok_threshold=0.95,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["constraint_satisfied"])
+        self.assertTrue(rows[0]["selected_best"])
+        self.assertEqual(rows[0]["mean_loss"], 1.1)
+
+    def test_build_test_summary_rows_uses_unanswerable_auto_pass_for_e2e_deepeval(self) -> None:
+        track_rows = [
+            {
+                "model_tag": "base",
+                "model_step": 0,
+                "model_path": "model",
+                "eval_track": "base_task",
+                "eval_variant": "think",
+                "num_source_answerable": 1,
+                "num_source_unanswerable": 1,
+            }
+        ]
+        detail_rows = [
+            {
+                "model_tag": "base",
+                "model_step": 0,
+                "model_path": "model",
+                "eval_track": "base_task",
+                "eval_variant": "think",
+                "source_id": "s1",
+                "sample_id": 1,
+                "source_is_answerable": True,
+                "source_is_unanswerable": False,
+                "e2e_answerability_success": True,
+            },
+            {
+                "model_tag": "base",
+                "model_step": 0,
+                "model_path": "model",
+                "eval_track": "base_task",
+                "eval_variant": "think",
+                "source_id": "s2",
+                "sample_id": 2,
+                "source_is_answerable": False,
+                "source_is_unanswerable": True,
+                "e2e_answerability_success": True,
+            },
+        ]
+        deepeval_detail_rows = [
+            {
+                "model_tag": "base",
+                "model_step": 0,
+                "model_path": "model",
+                "eval_track": "base_task",
+                "eval_variant": "think",
+                "source_id": "s1",
+                "sample_id": 1,
+                "success": False,
+                "score": 0.9,
+                "error": None,
+            }
+        ]
+        rows = build_test_summary_rows(
+            track_rows=track_rows,
+            detail_rows=detail_rows,
+            deepeval_detail_rows=deepeval_detail_rows,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["e2e_deepeval_pass_rate"], 0.5)
+        self.assertAlmostEqual(rows[0]["answerable_deepeval_pass_rate"], 0.0)
+        self.assertAlmostEqual(rows[0]["deepeval_scored_rate_on_answerable_gate"], 1.0)
 
     def test_project_settings_define_default_training_model(self) -> None:
         self.assertEqual(PROJECT_SETTINGS.model.target_training_llm, "Qwen/Qwen3-0.6B")
@@ -960,13 +1068,11 @@ class ModelEvalRefactorTests(unittest.TestCase):
                         "eval_variant": "checkpoint" if "base_protocol" not in args.generated_path else "fewshot_retry",
                         "parse_ok_rate": 0.99,
                         "protocol_ok_rate_given_parse_ok": 0.99,
-                        "evidence_substring_ok_rate_on_pred_answerable": 0.99,
-                        "correctness_reviewed_rate_on_pred_answerable": 0.9,
-                        "correctness_reviewed_rate_all_samples": 0.9,
-                        "answerability_accuracy_given_parse_ok": 0.9,
-                        "answerability_accuracy_all_samples": 0.9,
-                        "semantic_yes_rate_on_pred_answerable": 0.9,
-                        "semantic_yes_rate_all_samples": 0.9,
+                        "evidence_substring_rate_on_usable_pred_answerable": 0.99,
+                        "e2e_reviewed_correctness_success_rate": 0.9,
+                        "e2e_answerability_accuracy": 0.9,
+                        "e2e_semantic_success_rate": 0.9,
+                        "num_source_answerable": 1,
                     }
                 ],
                 [],
@@ -978,12 +1084,9 @@ class ModelEvalRefactorTests(unittest.TestCase):
                 "selected_model_path": "ckpt-100",
                 "constraint_satisfied": True,
                 "selection_metrics": {
-                    "correctness_reviewed_rate_on_pred_answerable": 0.9,
-                    "correctness_reviewed_rate_all_samples": 0.9,
-                    "answerability_accuracy_given_parse_ok": 0.9,
-                    "answerability_accuracy_all_samples": 0.9,
-                    "semantic_yes_rate_on_pred_answerable": 0.9,
-                    "semantic_yes_rate_all_samples": 0.9,
+                    "e2e_reviewed_correctness_success_rate": 0.9,
+                    "e2e_answerability_accuracy": 0.9,
+                    "e2e_semantic_success_rate": 0.9,
                     "mean_loss": 1.0,
                 },
             }
@@ -1024,6 +1127,7 @@ class ModelEvalRefactorTests(unittest.TestCase):
                     task_batch_size=1,
                     max_length=1024,
                     structured_max_new_tokens=64,
+                    structured_max_attempts=2,
                     base_protocol_max_new_tokens=64,
                     base_task_max_new_tokens=64,
                     base_task_think_max_new_tokens=128,
@@ -1031,7 +1135,7 @@ class ModelEvalRefactorTests(unittest.TestCase):
                     fewshot_k=2,
                     protocol_max_attempts=2,
                     protocol_temperature=0.2,
-                    structured_temperature=0.0,
+                    structured_temperature=0.2,
                     task_temperature=0.0,
                     parse_ok_threshold=0.95,
                     protocol_ok_threshold=0.98,
