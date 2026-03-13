@@ -185,9 +185,9 @@ class TrainingSettings:
     max_completion_tokens: int = 512
     train_epochs: float = 2.0
     learning_rate: float = 2e-4
-    train_batch_size: int = 8
-    eval_batch_size: int = 16
-    gradient_accumulation_steps: int = 4
+    train_batch_size: int = 4
+    eval_batch_size: int = 8
+    gradient_accumulation_steps: int = 8
     max_length: int = 1024
     save_steps: int = 50
     save_total_limit: int = 20
