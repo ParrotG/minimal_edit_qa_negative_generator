@@ -127,6 +127,7 @@ def _extract_question(row: Dict[str, Any], question_field: str) -> str:
 def _extract_answer(row: Dict[str, Any], answer_field: str) -> str:
     candidates = [
         row.get(answer_field),
+        row.get("raw_answer"),
         row.get("answer"),
         row.get("actual_output"),
     ]
@@ -405,7 +406,9 @@ def build_pack_row(*, row: Dict[str, Any], task_type: str, pack_id: str, idx: in
         if not is_flat_answerable_for_content_eval(row):
             skipped = "refusal_or_unanswerable" if row.get("refusal_detected") is True or str(row.get("pred_answerability") or "") == "unanswerable" else "missing_fields"
             return None, skipped
-        answer = str(row.get("extracted_answer") or "").strip()
+        answer = _extract_answer(row, answer_field="raw_answer")
+        if not answer:
+            answer = str(row.get("extracted_answer") or "").strip()
         if not question or not knowledge or not answer:
             return None, "missing_fields"
         premise_text = build_qa_premise(knowledge=knowledge, question=question)

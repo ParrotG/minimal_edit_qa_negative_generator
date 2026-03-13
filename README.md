@@ -144,6 +144,141 @@ This workflow writes two final summary CSV files:
 - `outputs/model_eval/final_report/report/validation_summary.csv` for checkpoint selection on the validation split
 - `outputs/model_eval/final_report/report/test_summary.csv` for final test-time comparison across the best checkpoint and the three baselines
 
+### 10.1 Step-by-Step Model Evaluation
+
+The one-command report workflow is convenient for final runs. For iterative development, the same evaluation pipeline can be executed step by step.
+
+Validation split, SFT checkpoints only:
+
+```bash
+python -m model_eval.eval_sft_loss_curve \
+  --data_path data/sft_dataset \
+  --split validation \
+  --lora_ckpt_list_path ckpt/sft_lora_groundedqa \
+  --out_csv outputs/model_eval/validation/sft_val_loss_curve.csv
+```
+
+```bash
+python -m model_eval.generate_structured_answers \
+  --data_path data/sft_dataset \
+  --split validation \
+  --lora_ckpt_list_path ckpt/sft_lora_groundedqa \
+  --out_jsonl outputs/model_eval/validation/sft_val_structured_generations.jsonl
+```
+
+```bash
+python -m model_eval.eval_grounded_qa \
+  --generated_path outputs/model_eval/validation/sft_val_structured_generations.jsonl \
+  --metrics_out outputs/model_eval/validation/sft_val_structured_curve.csv \
+  --details_out outputs/model_eval/validation/sft_val_structured_details.jsonl \
+  --confidence_out outputs/model_eval/validation/sft_val_confidence_analysis.json
+```
+
+Test split, best checkpoint after manual selection:
+
+```bash
+python -m model_eval.generate_structured_answers \
+  --data_path data/sft_dataset \
+  --split test \
+  --lora_ckpt_path ckpt/sft_lora_groundedqa/checkpoint-XXX \
+  --out_jsonl outputs/model_eval/test/best_ckpt_structured_generations.jsonl
+```
+
+```bash
+python -m model_eval.eval_grounded_qa \
+  --generated_path outputs/model_eval/test/best_ckpt_structured_generations.jsonl \
+  --metrics_out outputs/model_eval/test/best_ckpt_structured_curve.csv \
+  --details_out outputs/model_eval/test/best_ckpt_structured_details.jsonl \
+  --confidence_out outputs/model_eval/test/best_ckpt_structured_confidence.json
+```
+
+```bash
+python -m model_eval.eval_deepeval_hallucination \
+  --generated_path outputs/model_eval/test/best_ckpt_structured_generations.jsonl \
+  --input_mode structured \
+  --metrics_out outputs/model_eval/test/best_ckpt_structured_deepeval_curve.csv \
+  --details_out outputs/model_eval/test/best_ckpt_structured_deepeval_details.jsonl
+```
+
+Test split, base protocol baseline:
+
+```bash
+python -m model_eval.generate_structured_answers \
+  --data_path data/sft_dataset \
+  --split test \
+  --include_base \
+  --prompt_mode teacher_fewshot \
+  --out_jsonl outputs/model_eval/test/base_protocol_generations.jsonl
+```
+
+```bash
+python -m model_eval.eval_grounded_qa \
+  --generated_path outputs/model_eval/test/base_protocol_generations.jsonl \
+  --metrics_out outputs/model_eval/test/base_protocol_curve.csv \
+  --details_out outputs/model_eval/test/base_protocol_details.jsonl \
+  --confidence_out outputs/model_eval/test/base_protocol_confidence.json
+```
+
+```bash
+python -m model_eval.eval_deepeval_hallucination \
+  --generated_path outputs/model_eval/test/base_protocol_generations.jsonl \
+  --input_mode structured \
+  --metrics_out outputs/model_eval/test/base_protocol_deepeval_curve.csv \
+  --details_out outputs/model_eval/test/base_protocol_deepeval_details.jsonl
+```
+
+Test split, base task baselines:
+
+```bash
+python -m model_eval.generate_answers \
+  --data_path data/sft_dataset \
+  --split test \
+  --include_base \
+  --out_jsonl outputs/model_eval/test/base_task_no_think_generations.jsonl
+```
+
+```bash
+python -m model_eval.eval_task_content_baseline \
+  --generated_path outputs/model_eval/test/base_task_no_think_generations.jsonl \
+  --metrics_out outputs/model_eval/test/base_task_no_think_curve.csv \
+  --details_out outputs/model_eval/test/base_task_no_think_details.jsonl
+```
+
+```bash
+python -m model_eval.eval_deepeval_hallucination \
+  --generated_path outputs/model_eval/test/base_task_no_think_generations.jsonl \
+  --input_mode flat \
+  --answer_source answer \
+  --metrics_out outputs/model_eval/test/base_task_no_think_deepeval_curve.csv \
+  --details_out outputs/model_eval/test/base_task_no_think_deepeval_details.jsonl
+```
+
+```bash
+python -m model_eval.generate_answers \
+  --data_path data/sft_dataset \
+  --split test \
+  --include_base \
+  --enable_thinking \
+  --max_new_tokens 1024 \
+  --out_jsonl outputs/model_eval/test/base_task_think_generations.jsonl
+```
+
+```bash
+python -m model_eval.eval_task_content_baseline \
+  --generated_path outputs/model_eval/test/base_task_think_generations.jsonl \
+  --metrics_out outputs/model_eval/test/base_task_think_curve.csv \
+  --details_out outputs/model_eval/test/base_task_think_details.jsonl
+```
+
+```bash
+python -m model_eval.eval_deepeval_hallucination \
+  --generated_path outputs/model_eval/test/base_task_think_generations.jsonl \
+  --input_mode flat \
+  --answer_source answer \
+  --metrics_out outputs/model_eval/test/base_task_think_deepeval_curve.csv \
+  --details_out outputs/model_eval/test/base_task_think_deepeval_details.jsonl
+```
+
 ## Optional Calibration
 
 Calibration is optional. The repository already ships default judge settings, but you can recalibrate the task-level NLI and answer-equivalence judges against human annotations when needed.

@@ -72,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_check_answer_type)
     parser.add_argument("--qa_spacy_model", type=str, default=JudgeConfig.qa_spacy_model)
     parser.add_argument("--matcher_model_name", type=str, default=TransformerMatcherConfig.model_name)
+    parser.add_argument("--matcher_threshold", type=float, default=TransformerMatcherConfig.threshold)
 
     parser.add_argument("--api_model_name", type=str, default=AnswerExtractionConfig.api_model_name)
     parser.add_argument("--api_base_url", type=str, default=AnswerExtractionConfig.api_base_url)
@@ -137,7 +138,7 @@ def _select_best_checkpoint(
     def constraint_pass(row: Dict[str, Any]) -> bool:
         parse_ok = float(row.get("parse_ok_rate") or float("nan"))
         protocol_ok = float(row.get("protocol_ok_rate_given_parse_ok") or float("nan"))
-        evidence_ok = float(row.get("evidence_substring_ok_rate") or float("nan"))
+        evidence_ok = float(row.get("evidence_substring_ok_rate_on_pred_answerable") or float("nan"))
         return (
             not math.isnan(parse_ok)
             and not math.isnan(protocol_ok)
@@ -152,9 +153,9 @@ def _select_best_checkpoint(
 
     def sort_key(row: Dict[str, Any]) -> Tuple[float, float, float, float, int]:
         loss_row = loss_by_key.get(_model_key(row), {})
-        correctness, _ = _safe_metric(row.get("correctness_reviewed_rate"))
-        answerability, _ = _safe_metric(row.get("answerability_accuracy"))
-        semantic, _ = _safe_metric(row.get("semantic_yes_rate"))
+        correctness, _ = _safe_metric(row.get("correctness_reviewed_rate_on_pred_answerable"))
+        answerability, _ = _safe_metric(row.get("answerability_accuracy_given_parse_ok"))
+        semantic, _ = _safe_metric(row.get("semantic_yes_rate_on_pred_answerable"))
         _, loss_value = _safe_metric(loss_row.get("mean_loss"))
         return (
             correctness,
@@ -173,9 +174,12 @@ def _select_best_checkpoint(
         "selected_eval_track": selected.get("eval_track"),
         "selected_eval_variant": selected.get("eval_variant"),
         "selection_metrics": {
-            "correctness_reviewed_rate": selected.get("correctness_reviewed_rate"),
-            "answerability_accuracy": selected.get("answerability_accuracy"),
-            "semantic_yes_rate": selected.get("semantic_yes_rate"),
+            "correctness_reviewed_rate_on_pred_answerable": selected.get("correctness_reviewed_rate_on_pred_answerable"),
+            "correctness_reviewed_rate_all_samples": selected.get("correctness_reviewed_rate_all_samples"),
+            "answerability_accuracy_given_parse_ok": selected.get("answerability_accuracy_given_parse_ok"),
+            "answerability_accuracy_all_samples": selected.get("answerability_accuracy_all_samples"),
+            "semantic_yes_rate_on_pred_answerable": selected.get("semantic_yes_rate_on_pred_answerable"),
+            "semantic_yes_rate_all_samples": selected.get("semantic_yes_rate_all_samples"),
             "mean_loss": (loss_by_key.get(_model_key(selected), {}) or {}).get("mean_loss"),
         },
         "num_candidates": len(candidate_rows),
@@ -204,7 +208,7 @@ def _constraint_pass(row: Dict[str, Any], args: argparse.Namespace) -> bool:
     try:
         parse_ok = float(row.get("parse_ok_rate"))
         protocol_ok = float(row.get("protocol_ok_rate_given_parse_ok"))
-        evidence_ok = float(row.get("evidence_substring_ok_rate"))
+        evidence_ok = float(row.get("evidence_substring_ok_rate_on_pred_answerable"))
     except (TypeError, ValueError):
         return False
     return (
@@ -308,6 +312,7 @@ def _grounded_eval_args(
         qa_check_answer_type=bool(args.qa_check_answer_type),
         qa_spacy_model=args.qa_spacy_model,
         matcher_model_name=args.matcher_model_name,
+        matcher_threshold=args.matcher_threshold,
         metrics_out=metrics_out,
         details_out=details_out,
         confidence_out=confidence_out,
@@ -344,6 +349,7 @@ def _task_eval_args(
         qa_check_answer_type=bool(args.qa_check_answer_type),
         qa_spacy_model=args.qa_spacy_model,
         matcher_model_name=args.matcher_model_name,
+        matcher_threshold=args.matcher_threshold,
         api_model_name=args.api_model_name,
         api_base_url=args.api_base_url,
         api_key_env=args.api_key_env,

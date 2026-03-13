@@ -10,7 +10,7 @@ from unittest.mock import patch
 try:
     from calibrate.build_annotation_pack import _enrich_rows_from_sibling_generations
     from calibrate.common import build_annotation_pack_rows, group_rows, load_annotation_rows
-    from qa_checks import check_answer_correctness
+    from qa_checks import SemanticCheckReport, check_answer_correctness
     from qa_checks.correctness import CorrectnessConfig
 
     from model_eval.answer_extraction import parse_answer_extraction_output
@@ -27,8 +27,11 @@ try:
     from model_eval.correctness_transformer_matcher import (
         AnswerEquivalenceTransformerMatcher,
         TransformerMatcherConfig,
+        TransformerMatcherReviewReport,
     )
-    from model_eval.eval_grounded_qa import _normalized_resolution
+    from model_eval.eval_deepeval_hallucination import _run_deepeval_with_fallback
+    from model_eval.eval_grounded_qa import _evaluate_one_model, _normalized_resolution
+    from model_eval.eval_task_content_baseline import _evaluate_model_rows
     from model_eval.generate_structured_answers import _build_prompt, _generate_batch_with_retry
     from model_eval.merge_eval_curves import _project_rows
     from model_eval.run_sft_eval_report import _select_best_checkpoint, run_sft_eval_report
@@ -51,9 +54,14 @@ except ModuleNotFoundError:  # pragma: no cover
     load_dataset_split = None
     load_structured_generation_items = None
     normalize_generated_row = None
+    SemanticCheckReport = None
     AnswerEquivalenceTransformerMatcher = None
     TransformerMatcherConfig = None
+    TransformerMatcherReviewReport = None
+    _run_deepeval_with_fallback = None
+    _evaluate_one_model = None
     _normalized_resolution = None
+    _evaluate_model_rows = None
     _build_prompt = None
     _generate_batch_with_retry = None
     _project_rows = None
@@ -87,12 +95,17 @@ def _write_jsonl(path: Path, rows) -> None:
             load_dataset_split,
             load_structured_generation_items,
             normalize_generated_row,
+            SemanticCheckReport,
             check_answer_correctness,
             parse_answer_extraction_output,
             extract_structured_output_text,
             AnswerEquivalenceTransformerMatcher,
             TransformerMatcherConfig,
+            TransformerMatcherReviewReport,
+            _run_deepeval_with_fallback,
+            _evaluate_one_model,
             _normalized_resolution,
+            _evaluate_model_rows,
             _build_prompt,
             _generate_batch_with_retry,
             _project_rows,
@@ -257,6 +270,193 @@ class ModelEvalRefactorTests(unittest.TestCase):
         self.assertEqual(result.short_answer, "")
         self.assertTrue(result.refusal_detected)
 
+    def test_transformer_matcher_threshold_changes_runtime_decision(self) -> None:
+        class DummyMatcher:
+            def __init__(self, model_name: str) -> None:
+                self.model_name = model_name
+
+            def get_score(self, reference_answer: str, candidate_answer: str, question: str) -> float:
+                return 0.9 if question == "Q1" else 0.1
+
+        with patch("model_eval.correctness_transformer_matcher.QaMetricsTransformerMatcher", DummyMatcher):
+            low_threshold_judge = AnswerEquivalenceTransformerMatcher(
+                TransformerMatcherConfig(model_name="zli12321/answer_equivalence_roberta-large", threshold=0.5)
+            )
+            high_threshold_judge = AnswerEquivalenceTransformerMatcher(
+                TransformerMatcherConfig(model_name="zli12321/answer_equivalence_roberta-large", threshold=0.95)
+            )
+            rows = [
+                {"question": "Q1", "reference_answer": "A1", "answer": "B1"},
+                {"question": "Q2", "reference_answer": "A2", "answer": "B2"},
+            ]
+            low_reports = low_threshold_judge.review_batch(rows)
+            high_reports = high_threshold_judge.review_batch(rows)
+        self.assertEqual(len(low_reports), 2)
+        self.assertEqual(low_reports[0].match_score, high_reports[0].match_score)
+        self.assertEqual(low_reports[1].match_score, high_reports[1].match_score)
+        self.assertTrue(low_reports[0].ok)
+        self.assertFalse(high_reports[0].ok)
+        self.assertFalse(low_reports[1].ok)
+        self.assertFalse(high_reports[1].ok)
+
+    def test_structured_eval_reports_gated_and_all_sample_rates(self) -> None:
+        class DummyMatcher:
+            def review_batch(self, rows):
+                return [
+                    TransformerMatcherReviewReport(
+                        used=True,
+                        ok=True,
+                        match_score=0.95,
+                        issues=[],
+                    )
+                    for _ in rows
+                ]
+
+        rows = [
+            {
+                "raw_output": "not json",
+                "question": "Who founded Acme?",
+                "knowledge": "Acme was founded by Alice.",
+                "reference_answer": "Alice",
+                "answerability_label": "answerable",
+            },
+            {
+                "parsed_output": {
+                    "answerability": "answerable",
+                    "evidence": [{"quote": "Acme was founded by Alice."}],
+                    "rationale": "The evidence identifies Alice as the founder.",
+                    "answer": "Alicia",
+                    "confidence": "high",
+                },
+                "question": "Who founded Acme?",
+                "knowledge": "Acme was founded by Alice.",
+                "reference_answer": "Alice",
+                "answerability_label": "answerable",
+            },
+        ]
+
+        semantic_report = SemanticCheckReport(
+            ok=True,
+            supported=True,
+            answer_type_ok=True,
+            refusal_ok=None,
+            decision="yes",
+            margin=0.8,
+            details={},
+            issues=[],
+        )
+        with patch(
+            "model_eval.eval_grounded_qa.evaluate_structured_semantics_batch",
+            return_value=[semantic_report],
+        ):
+            metrics, _, _ = _evaluate_one_model(
+                rows=rows,
+                structured_judge=object(),
+                matcher=DummyMatcher(),
+                correctness_cfg=CorrectnessConfig(),
+                semantic_decision_source="full_binary",
+                enable_semantics=True,
+            )
+
+        self.assertAlmostEqual(metrics["parse_ok_rate"], 0.5)
+        self.assertAlmostEqual(metrics["protocol_ok_rate_given_parse_ok"], 1.0)
+        self.assertAlmostEqual(metrics["protocol_ok_rate_all_samples"], 0.5)
+        self.assertAlmostEqual(metrics["answerability_accuracy_given_parse_ok"], 1.0)
+        self.assertAlmostEqual(metrics["answerability_accuracy_all_samples"], 0.5)
+        self.assertAlmostEqual(metrics["evidence_substring_ok_rate_on_pred_answerable"], 1.0)
+        self.assertAlmostEqual(metrics["evidence_substring_ok_rate_all_samples"], 0.5)
+        self.assertAlmostEqual(metrics["correctness_reviewed_rate_on_pred_answerable"], 1.0)
+        self.assertAlmostEqual(metrics["correctness_reviewed_rate_all_samples"], 0.5)
+        self.assertAlmostEqual(metrics["semantic_yes_rate_on_pred_answerable"], 1.0)
+        self.assertAlmostEqual(metrics["semantic_yes_rate_all_samples"], 0.5)
+
+    def test_flat_eval_reports_gated_and_all_sample_rates(self) -> None:
+        class DummyMatcher:
+            def review_batch(self, rows):
+                return [
+                    TransformerMatcherReviewReport(
+                        used=True,
+                        ok=True,
+                        match_score=0.88,
+                        issues=[],
+                    )
+                    for _ in rows
+                ]
+
+        class DummyJudge:
+            def judge(self, rows):
+                judged = []
+                for row in rows:
+                    judged.append(
+                        {
+                            **row,
+                            "judge": {
+                                "margin": 0.7,
+                                "full_binary": {
+                                    "decision": "yes",
+                                },
+                                "reject_aware": {
+                                    "decision": "yes",
+                                },
+                            },
+                        }
+                    )
+                return judged, {}
+
+        rows = [
+            {
+                "question": "Who founded Acme?",
+                "knowledge": "Acme was founded by Alice.",
+                "reference_answer": "Alice",
+                "answerability_label": "answerable",
+                "answer": "irrelevant",
+            },
+            {
+                "question": "Who founded Acme?",
+                "knowledge": "Acme was founded by Alice.",
+                "reference_answer": "Alice",
+                "answerability_label": "answerable",
+                "answer": "irrelevant",
+            },
+        ]
+        extracted_rows = [
+            {
+                **rows[0],
+                "extraction_parse_ok": False,
+                "refusal_detected": None,
+                "extracted_answer": "",
+            },
+            {
+                **rows[1],
+                "extraction_parse_ok": True,
+                "refusal_detected": False,
+                "extracted_answer": "Alicia",
+            },
+        ]
+
+        with patch(
+            "model_eval.eval_task_content_baseline.extract_answers_with_llm",
+            return_value=extracted_rows,
+        ):
+            metrics, _ = _evaluate_model_rows(
+                rows=rows,
+                extractor=object(),
+                extraction_cfg=None,
+                judge=DummyJudge(),
+                matcher=DummyMatcher(),
+                decision_source="full_binary",
+                correctness_cfg=CorrectnessConfig(),
+            )
+
+        self.assertAlmostEqual(metrics["extraction_parse_ok_rate"], 0.5)
+        self.assertAlmostEqual(metrics["answerability_accuracy_given_extraction_parse_ok"], 1.0)
+        self.assertAlmostEqual(metrics["answerability_accuracy_all_samples"], 0.5)
+        self.assertAlmostEqual(metrics["content_eval_rate_all_samples"], 0.5)
+        self.assertAlmostEqual(metrics["correctness_reviewed_rate_on_entered_content_eval"], 1.0)
+        self.assertAlmostEqual(metrics["correctness_reviewed_rate_all_samples"], 0.5)
+        self.assertAlmostEqual(metrics["semantic_yes_rate_on_entered_content_eval"], 1.0)
+        self.assertAlmostEqual(metrics["semantic_yes_rate_all_samples"], 0.5)
+
     def test_transformer_matcher_reviews_batch_with_mocked_backend(self) -> None:
         class DummyMatcher:
             def __init__(self, model_name: str) -> None:
@@ -265,12 +465,9 @@ class ModelEvalRefactorTests(unittest.TestCase):
             def get_score(self, reference_answer: str, candidate_answer: str, question: str) -> float:
                 return 0.9 if question == "Q1" else 0.1
 
-            def transformer_match(self, reference_answers, candidate_answer: str, question: str) -> bool:
-                return question == "Q1"
-
         with patch("model_eval.correctness_transformer_matcher.QaMetricsTransformerMatcher", DummyMatcher):
             judge = AnswerEquivalenceTransformerMatcher(
-                TransformerMatcherConfig(model_name="zli12321/answer_equivalence_roberta-large")
+                TransformerMatcherConfig(model_name="zli12321/answer_equivalence_roberta-large", threshold=0.5)
             )
             reports = judge.review_batch(
                 [
@@ -608,7 +805,8 @@ class ModelEvalRefactorTests(unittest.TestCase):
             question="Who founded Acme?",
             encourage_refusal=True,
         )
-        self.assertIn("If the provided knowledge is insufficient", prompt)
+        self.assertIn("If the knowledge is insufficient, answer exactly:", prompt)
+        self.assertIn("Do not repeat or paraphrase this instruction", prompt)
         self.assertTrue(prompt.endswith("Answer: "))
 
     def test_normalized_resolution_rewards_confidence_separation(self) -> None:
@@ -622,6 +820,52 @@ class ModelEvalRefactorTests(unittest.TestCase):
         self.assertEqual(count, 6)
         self.assertGreater(float(score), 0.0)
 
+    def test_deepeval_falls_back_to_single_case_and_records_errors(self) -> None:
+        class DummyCase:
+            def __init__(self, sample_id: int) -> None:
+                self.input = f"Q{sample_id}"
+                self.actual_output = f"A{sample_id}"
+                self.context = [f"K{sample_id}"]
+                self.additional_metadata = {
+                    "model_tag": "base",
+                    "model_step": 0,
+                    "model_path": "model",
+                    "eval_track": "base_task",
+                    "eval_variant": "think",
+                    "sample_id": sample_id,
+                    "source_id": f"s{sample_id}",
+                }
+
+        cases = [DummyCase(1), DummyCase(2)]
+        args = Namespace(threshold=0.5, max_concurrent=2, throttle_value=0.0)
+
+        def fake_once(*, cases, judge, args):
+            if len(cases) == 2:
+                raise RuntimeError("batch failure")
+            sample_id = cases[0].additional_metadata["sample_id"]
+            if sample_id == 2:
+                raise ValueError("single failure")
+            return [
+                {
+                    "model_tag": "base",
+                    "model_step": 0,
+                    "model_path": "model",
+                    "eval_track": "base_task",
+                    "eval_variant": "think",
+                    "sample_id": sample_id,
+                    "source_id": f"s{sample_id}",
+                    "score": 0.1,
+                    "success": True,
+                    "error": None,
+                }
+            ]
+
+        with patch("model_eval.eval_deepeval_hallucination._run_deepeval_once", side_effect=fake_once):
+            details = _run_deepeval_with_fallback(cases=cases, judge=object(), args=args)
+        self.assertEqual(len(details), 2)
+        self.assertIsNone(details[0]["error"])
+        self.assertIn("ValueError: single failure", details[1]["error"])
+
     def test_select_best_checkpoint_prefers_hard_constraint_then_main_targets(self) -> None:
         selection = _select_best_checkpoint(
             eval_rows=[
@@ -633,10 +877,10 @@ class ModelEvalRefactorTests(unittest.TestCase):
                     "eval_variant": "checkpoint",
                     "parse_ok_rate": 0.94,
                     "protocol_ok_rate_given_parse_ok": 0.99,
-                    "evidence_substring_ok_rate": 0.99,
-                    "correctness_reviewed_rate": 0.95,
-                    "answerability_accuracy": 0.95,
-                    "semantic_yes_rate": 0.90,
+                    "evidence_substring_ok_rate_on_pred_answerable": 0.99,
+                    "correctness_reviewed_rate_on_pred_answerable": 0.95,
+                    "answerability_accuracy_given_parse_ok": 0.95,
+                    "semantic_yes_rate_on_pred_answerable": 0.90,
                 },
                 {
                     "model_tag": "checkpoint-200",
@@ -646,10 +890,10 @@ class ModelEvalRefactorTests(unittest.TestCase):
                     "eval_variant": "checkpoint",
                     "parse_ok_rate": 0.97,
                     "protocol_ok_rate_given_parse_ok": 0.99,
-                    "evidence_substring_ok_rate": 0.97,
-                    "correctness_reviewed_rate": 0.90,
-                    "answerability_accuracy": 0.96,
-                    "semantic_yes_rate": 0.89,
+                    "evidence_substring_ok_rate_on_pred_answerable": 0.97,
+                    "correctness_reviewed_rate_on_pred_answerable": 0.90,
+                    "answerability_accuracy_given_parse_ok": 0.96,
+                    "semantic_yes_rate_on_pred_answerable": 0.89,
                 },
             ],
             loss_rows=[
@@ -716,10 +960,13 @@ class ModelEvalRefactorTests(unittest.TestCase):
                         "eval_variant": "checkpoint" if "base_protocol" not in args.generated_path else "fewshot_retry",
                         "parse_ok_rate": 0.99,
                         "protocol_ok_rate_given_parse_ok": 0.99,
-                        "evidence_substring_ok_rate": 0.99,
-                        "correctness_reviewed_rate": 0.9,
-                        "answerability_accuracy": 0.9,
-                        "semantic_yes_rate": 0.9,
+                        "evidence_substring_ok_rate_on_pred_answerable": 0.99,
+                        "correctness_reviewed_rate_on_pred_answerable": 0.9,
+                        "correctness_reviewed_rate_all_samples": 0.9,
+                        "answerability_accuracy_given_parse_ok": 0.9,
+                        "answerability_accuracy_all_samples": 0.9,
+                        "semantic_yes_rate_on_pred_answerable": 0.9,
+                        "semantic_yes_rate_all_samples": 0.9,
                     }
                 ],
                 [],
@@ -731,9 +978,12 @@ class ModelEvalRefactorTests(unittest.TestCase):
                 "selected_model_path": "ckpt-100",
                 "constraint_satisfied": True,
                 "selection_metrics": {
-                    "correctness_reviewed_rate": 0.9,
-                    "answerability_accuracy": 0.9,
-                    "semantic_yes_rate": 0.9,
+                    "correctness_reviewed_rate_on_pred_answerable": 0.9,
+                    "correctness_reviewed_rate_all_samples": 0.9,
+                    "answerability_accuracy_given_parse_ok": 0.9,
+                    "answerability_accuracy_all_samples": 0.9,
+                    "semantic_yes_rate_on_pred_answerable": 0.9,
+                    "semantic_yes_rate_all_samples": 0.9,
                     "mean_loss": 1.0,
                 },
             }
@@ -802,6 +1052,7 @@ class ModelEvalRefactorTests(unittest.TestCase):
                     qa_check_answer_type=True,
                     qa_spacy_model="en_core_web_trf",
                     matcher_model_name="matcher",
+                    matcher_threshold=0.5,
                     api_model_name="api",
                     api_base_url="https://example.invalid",
                     api_key_env="DASHSCOPE_API_KEY",
@@ -830,6 +1081,87 @@ class ModelEvalRefactorTests(unittest.TestCase):
 
         self.assertEqual(structured_calls, [("val-ds", "validation", "infer"), ("test-ds", "test", "infer"), ("test-ds", "test", "teacher_fewshot")])
         self.assertEqual(task_calls, [("test-ds", "test", "no_think"), ("test-ds", "test", "think")])
+
+    def test_flat_calibration_pack_uses_raw_answer_for_nli(self) -> None:
+        rows = [
+            {
+                "sample_id": 1,
+                "source_id": "s1",
+                "model_tag": "base",
+                "model_step": 0,
+                "model_path": "model",
+                "question": "Who founded Acme?",
+                "knowledge": "Acme was founded by Alice.",
+                "reference_answer": "Alice",
+                "raw_answer": "Based on the provided information, the answer is Alice.",
+                "extraction_parse_ok": True,
+                "refusal_detected": False,
+                "extracted_answer": "Alice",
+                "pred_answerability": "answerable",
+            }
+        ]
+        pack_rows, _ = build_annotation_pack_rows(
+            rows=rows,
+            task_types=["nli_flat"],
+            max_samples_per_task=-1,
+            seed=42,
+            pack_id="pack-raw",
+        )
+        self.assertEqual(len(pack_rows), 1)
+        self.assertEqual(pack_rows[0]["answer"], "Based on the provided information, the answer is Alice.")
+        self.assertEqual(pack_rows[0]["hypothesis_text"], "Based on the provided information, the answer is Alice.")
+
+    def test_flat_semantic_judge_uses_raw_answer_not_extracted_answer(self) -> None:
+        class DummyExtractor:
+            pass
+
+        class DummyMatcher:
+            def review_batch(self, rows):
+                return []
+
+        class DummyJudge:
+            def __init__(self) -> None:
+                self.rows = None
+
+            def judge(self, rows):
+                self.rows = rows
+                return ([{"judge": {"full_binary": {"decision": "yes"}, "margin": 1.0}} for _ in rows], {})
+
+        extractor = DummyExtractor()
+        matcher = DummyMatcher()
+        judge = DummyJudge()
+
+        with patch("model_eval.eval_task_content_baseline.extract_answers_with_llm") as mock_extract:
+            mock_extract.return_value = [
+                {
+                    "model_tag": "base",
+                    "model_step": 0,
+                    "model_path": "model",
+                    "eval_track": "base_task",
+                    "eval_variant": "think",
+                    "sample_id": 1,
+                    "source_id": "s1",
+                    "question": "Who founded Acme?",
+                    "knowledge": "Acme was founded by Alice.",
+                    "reference_answer": "Alice",
+                    "answerability_label": "answerable",
+                    "answer": "Based on the provided information, the answer is Alice.",
+                    "extraction_parse_ok": True,
+                    "refusal_detected": False,
+                    "extracted_answer": "Alice",
+                }
+            ]
+            _evaluate_model_rows(
+                rows=[{"source_id": "s1"}],
+                extractor=extractor,
+                extraction_cfg=Namespace(),
+                judge=judge,
+                matcher=matcher,
+                decision_source="full_binary",
+                correctness_cfg=CorrectnessConfig(),
+            )
+        self.assertIsNotNone(judge.rows)
+        self.assertEqual(judge.rows[0]["answer"], "Based on the provided information, the answer is Alice.")
 
 
 if __name__ == "__main__":

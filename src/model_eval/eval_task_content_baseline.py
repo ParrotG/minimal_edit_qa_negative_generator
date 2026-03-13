@@ -47,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_check_answer_type)
     parser.add_argument("--qa_spacy_model", type=str, default=JudgeConfig.qa_spacy_model)
     parser.add_argument("--matcher_model_name", type=str, default=TransformerMatcherConfig.model_name)
+    parser.add_argument("--matcher_threshold", type=float, default=TransformerMatcherConfig.threshold)
     parser.add_argument("--api_model_name", type=str, default=AnswerExtractionConfig.api_model_name)
     parser.add_argument("--api_base_url", type=str, default=AnswerExtractionConfig.api_base_url)
     parser.add_argument("--api_key_env", type=str, default=AnswerExtractionConfig.api_key_env)
@@ -102,6 +103,7 @@ def _build_transformer_matcher(args: argparse.Namespace) -> AnswerEquivalenceTra
     return AnswerEquivalenceTransformerMatcher(
         TransformerMatcherConfig(
             model_name=args.matcher_model_name,
+            threshold=args.matcher_threshold,
         )
     )
 
@@ -147,17 +149,21 @@ def _evaluate_model_rows(
             "extraction_parse_ok_rate": float("nan"),
             "refusal_detected_rate": float("nan"),
             "answerability_total": 0,
-            "answerability_accuracy": float("nan"),
+            "answerability_accuracy_given_extraction_parse_ok": float("nan"),
+            "answerability_accuracy_all_samples": float("nan"),
             "content_eval_total": 0,
-            "content_eval_rate": float("nan"),
+            "content_eval_rate_all_samples": float("nan"),
             "num_refusal_or_unanswerable_skipped": 0,
             "correctness_total": 0,
-            "correctness_strict_rate": float("nan"),
+            "correctness_strict_rate_on_entered_content_eval": float("nan"),
+            "correctness_strict_rate_all_samples": float("nan"),
             "correctness_matcher_review_total": 0,
             "correctness_matcher_positive_rate": float("nan"),
-            "correctness_reviewed_rate": float("nan"),
+            "correctness_reviewed_rate_on_entered_content_eval": float("nan"),
+            "correctness_reviewed_rate_all_samples": float("nan"),
             "semantic_total": 0,
-            "semantic_yes_rate": float("nan"),
+            "semantic_yes_rate_on_entered_content_eval": float("nan"),
+            "semantic_yes_rate_all_samples": float("nan"),
             "semantic_margin_mean": float("nan"),
         }, []
 
@@ -194,6 +200,7 @@ def _evaluate_model_rows(
                 answerability_correct += int(pred_label == gold_label)
 
         extracted_answer = str(row.get("extracted_answer") or "").strip()
+        raw_answer = str(row.get("answer") or "").strip()
         gate_row = {
             **row,
             "pred_answerability": pred_label,
@@ -227,7 +234,7 @@ def _evaluate_model_rows(
                 {
                     "knowledge": str(row.get("knowledge") or ""),
                     "question": str(row.get("question") or ""),
-                    "answer": extracted_answer,
+                    "answer": raw_answer or extracted_answer,
                 }
             )
             judge_indices.append(idx)
@@ -335,20 +342,24 @@ def _evaluate_model_rows(
         "refusal_detected_rate": _safe_rate(refusal_detected_count, len(rows)),
         "answerability_total": answerability_total,
         "answerability_correct": answerability_correct,
-        "answerability_accuracy": _safe_rate(answerability_correct, answerability_total),
+        "answerability_accuracy_given_extraction_parse_ok": _safe_rate(answerability_correct, parse_ok_count),
+        "answerability_accuracy_all_samples": _safe_rate(answerability_correct, len(rows)),
         "content_eval_total": content_eval_total,
-        "content_eval_rate": _safe_rate(content_eval_total, len(rows)),
+        "content_eval_rate_all_samples": _safe_rate(content_eval_total, len(rows)),
         "num_refusal_or_unanswerable_skipped": refusal_or_unanswerable_skipped,
         "correctness_total": correctness_total,
         "correctness_strict_ok": correctness_strict_ok,
-        "correctness_strict_rate": _safe_rate(correctness_strict_ok, correctness_total),
+        "correctness_strict_rate_on_entered_content_eval": _safe_rate(correctness_strict_ok, content_eval_total),
+        "correctness_strict_rate_all_samples": _safe_rate(correctness_strict_ok, len(rows)),
         "correctness_matcher_review_total": correctness_matcher_review_total,
         "correctness_matcher_positive": correctness_matcher_positive,
         "correctness_matcher_positive_rate": _safe_rate(correctness_matcher_positive, correctness_matcher_review_total),
         "correctness_reviewed_ok": correctness_reviewed_ok,
-        "correctness_reviewed_rate": _safe_rate(correctness_reviewed_ok, correctness_total),
+        "correctness_reviewed_rate_on_entered_content_eval": _safe_rate(correctness_reviewed_ok, content_eval_total),
+        "correctness_reviewed_rate_all_samples": _safe_rate(correctness_reviewed_ok, len(rows)),
         "semantic_total": semantic_total,
-        "semantic_yes_rate": _safe_rate(semantic_yes, semantic_total),
+        "semantic_yes_rate_on_entered_content_eval": _safe_rate(semantic_yes, content_eval_total),
+        "semantic_yes_rate_all_samples": _safe_rate(semantic_yes, len(rows)),
         "semantic_margin_mean": _safe_mean(semantic_margins),
     }
     return metrics, output_rows

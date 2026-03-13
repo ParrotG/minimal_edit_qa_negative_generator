@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .config import UnifiedLLMConfig
 from .types import LocalGenerationResult, TokenUsage
-from prompt import build_qa_answer_prefix
+from prompt import build_qa_answer_prefix, build_qa_premise
 
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.IGNORECASE | re.DOTALL)
@@ -161,18 +161,14 @@ class UnifiedTextGenerator:
         question_text = str(question or "").strip()
         if not question_text:
             raise ValueError("question must not be empty.")
-        prompt = build_qa_answer_prefix(knowledge=knowledge, question=question_text)
         if not encourage_refusal:
-            return prompt
-        if prompt.endswith("Answer: "):
-            return (
-                prompt[:-8]
-                + "If the provided knowledge is insufficient, reply that you do not know based on the knowledge.\n"
-                + "Answer: "
-            )
+            return build_qa_answer_prefix(knowledge=knowledge, question=question_text)
+        premise = build_qa_premise(knowledge=knowledge, question=question_text)
         return (
-            f"{prompt}\n"
-            "If the provided knowledge is insufficient, reply that you do not know based on the knowledge.\n"
+            "Use only the provided knowledge to answer the question.\n"
+            "If the knowledge is insufficient, answer exactly: I do not know based on the knowledge.\n"
+            f"{premise}\n"
+            "Answer: "
         )
 
     def _generate_batch_results(

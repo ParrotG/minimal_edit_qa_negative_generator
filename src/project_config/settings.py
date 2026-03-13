@@ -147,6 +147,7 @@ class CalibrationSettings:
     matcher_threshold_min: float = 0.0
     matcher_threshold_max: float = 1.0
     matcher_threshold_step: float = 0.01
+    matcher_runtime_threshold: float = 0.5
     matcher_model_name: str = "zli12321/answer_equivalence_roberta-large"
     annotation_task_types: Tuple[str, ...] = ("nli_flat", "nli_structured", "matcher")
 

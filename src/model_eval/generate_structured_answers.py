@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
         help="Directory containing checkpoint-* subdirectories, or a text file with checkpoint paths.",
     )
     parser.add_argument("--include_base", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
