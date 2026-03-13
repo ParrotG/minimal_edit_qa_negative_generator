@@ -14,12 +14,12 @@ try:
     from src.qa_protocol import build_infer_prompt
     from src.qa_protocol.token_budget import count_text_tokens_batch
     from src.dataio import read_jsonl, write_json
-    from src.project_config import PROJECT_SETTINGS
+    from src.project_config.resolve import resolve_training_args
 except ImportError:  # pragma: no cover - compatibility fallback for editable installs.
     from qa_protocol import build_infer_prompt
     from qa_protocol.token_budget import count_text_tokens_batch
     from dataio import read_jsonl, write_json
-    from project_config import PROJECT_SETTINGS
+    from project_config.resolve import resolve_training_args
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,67 +50,67 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output_dir", type=str, required=True, help="Output DatasetDict.save_to_disk directory.")
     parser.add_argument("--overwrite_output", action="store_true", help="Overwrite the output directory if it exists.")
-    parser.add_argument("--seed", type=int, default=42, help="Sampling seed for deterministic capped sampling.")
+    parser.add_argument("--seed", type=int, default=None, help="Sampling seed for deterministic capped sampling.")
     parser.add_argument("--no_shuffle", action="store_true", help="Disable shuffle before capped sampling.")
-    parser.add_argument("--max_train_samples", type=int, default=-1, help="Maximum train rows after filtering.")
-    parser.add_argument("--max_validation_samples", type=int, default=-1, help="Maximum validation rows after filtering.")
-    parser.add_argument("--max_test_samples", type=int, default=-1, help="Maximum test rows after filtering.")
+    parser.add_argument("--max_train_samples", type=int, default=None, help="Maximum train rows after filtering.")
+    parser.add_argument("--max_validation_samples", type=int, default=None, help="Maximum validation rows after filtering.")
+    parser.add_argument("--max_test_samples", type=int, default=None, help="Maximum test rows after filtering.")
     parser.add_argument(
         "--max_train_answerable_samples",
         type=int,
-        default=-1,
+        default=None,
         help="Maximum answerable rows for train split.",
     )
     parser.add_argument(
         "--max_train_unanswerable_samples",
         type=int,
-        default=-1,
+        default=None,
         help="Maximum unanswerable rows for train split.",
     )
     parser.add_argument(
         "--max_validation_answerable_samples",
         type=int,
-        default=-1,
+        default=None,
         help="Maximum answerable rows for validation split.",
     )
     parser.add_argument(
         "--max_validation_unanswerable_samples",
         type=int,
-        default=-1,
+        default=None,
         help="Maximum unanswerable rows for validation split.",
     )
     parser.add_argument(
         "--max_test_answerable_samples",
         type=int,
-        default=-1,
+        default=None,
         help="Maximum answerable rows for test split.",
     )
     parser.add_argument(
         "--max_test_unanswerable_samples",
         type=int,
-        default=-1,
+        default=None,
         help="Maximum unanswerable rows for test split.",
     )
     parser.add_argument(
         "--tokenizer_name",
         type=str,
-        default=PROJECT_SETTINGS.model.default_tokenizer_name,
+        default=None,
         help="Tokenizer used for token filtering.",
     )
     parser.add_argument(
         "--max_prompt_tokens",
         type=int,
-        default=-1,
+        default=None,
         help="Optional prompt token upper bound. <=0 disables this filter.",
     )
     parser.add_argument(
         "--max_completion_tokens",
         type=int,
-        default=-1,
+        default=None,
         help="Optional completion token upper bound. <=0 disables this filter.",
     )
     parser.add_argument("--metrics_out", type=str, default=None, help="Optional JSON metrics output path.")
-    return parser.parse_args()
+    return resolve_training_args(parser.parse_args())
 
 
 def _prepare_output_dir(path: str, overwrite: bool) -> None:

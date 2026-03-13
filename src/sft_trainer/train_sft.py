@@ -9,7 +9,7 @@ import torch
 from datasets import Dataset, DatasetDict, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
 
-from project_config import PROJECT_SETTINGS
+from project_config.resolve import resolve_training_args
 
 try:
     from peft import LoraConfig, get_peft_model
@@ -21,26 +21,26 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, required=True, help="Path from DatasetDict.save_to_disk.")
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for LoRA checkpoints.")
-    parser.add_argument("--model_name_or_path", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
-    parser.add_argument("--train_epochs", type=float, default=2.0)
-    parser.add_argument("--learning_rate", type=float, default=2e-4)
-    parser.add_argument("--train_batch_size", type=int, default=2)
-    parser.add_argument("--eval_batch_size", type=int, default=2)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max_length", type=int, default=1024)
-    parser.add_argument("--save_steps", type=int, default=50)
-    parser.add_argument("--save_total_limit", type=int, default=20)
-    parser.add_argument("--logging_steps", type=int, default=10)
-    parser.add_argument("--lora_r", type=int, default=16)
-    parser.add_argument("--lora_alpha", type=int, default=32)
-    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--model_name_or_path", type=str, default=None)
+    parser.add_argument("--train_epochs", type=float, default=None)
+    parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--train_batch_size", type=int, default=None)
+    parser.add_argument("--eval_batch_size", type=int, default=None)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--max_length", type=int, default=None)
+    parser.add_argument("--save_steps", type=int, default=None)
+    parser.add_argument("--save_total_limit", type=int, default=None)
+    parser.add_argument("--logging_steps", type=int, default=None)
+    parser.add_argument("--lora_r", type=int, default=None)
+    parser.add_argument("--lora_alpha", type=int, default=None)
+    parser.add_argument("--lora_dropout", type=float, default=None)
     parser.add_argument(
         "--lora_target_modules",
         type=str,
-        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        default=None,
     )
-    return parser.parse_args()
+    return resolve_training_args(parser.parse_args())
 
 
 def _load_dataset(data_dir: str) -> tuple[Dataset, Optional[Dataset]]:

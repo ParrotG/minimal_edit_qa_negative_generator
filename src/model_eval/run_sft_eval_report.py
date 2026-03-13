@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from dataio import write_json, write_jsonl
 from project_config import PROJECT_SETTINGS
+from project_config.resolve import resolve_eval_args, resolve_matcher_args, resolve_nli_args
 from qa_checks.correctness import CorrectnessConfig
 from qa_judge.config import JudgeConfig, NLIConfig
 
@@ -33,73 +34,159 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--validation_data_path", type=str, required=True, help="Validation dataset path.")
     parser.add_argument("--test_data_path", type=str, required=True, help="Test dataset path.")
-    parser.add_argument("--validation_split", type=str, default="validation")
-    parser.add_argument("--test_split", type=str, default="test")
-    parser.add_argument("--validation_max_samples", type=int, default=200)
-    parser.add_argument("--test_max_samples", type=int, default=200)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--base_model", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
+    parser.add_argument("--validation_split", type=str, default=None)
+    parser.add_argument("--test_split", type=str, default=None)
+    parser.add_argument("--validation_max_samples", type=int, default=None)
+    parser.add_argument("--test_max_samples", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--base_model", type=str, default=None)
     parser.add_argument("--lora_ckpt_path", type=str, default=None)
     parser.add_argument("--lora_ckpt_list_path", type=str, default=None)
     parser.add_argument("--out_dir", type=str, required=True)
 
-    parser.add_argument("--structured_batch_size", type=int, default=16)
-    parser.add_argument("--task_batch_size", type=int, default=16)
-    parser.add_argument("--max_length", type=int, default=1024)
-    parser.add_argument("--structured_max_new_tokens", type=int, default=512)
-    parser.add_argument("--structured_max_attempts", type=int, default=2)
-    parser.add_argument("--base_protocol_max_new_tokens", type=int, default=512)
-    parser.add_argument("--base_task_max_new_tokens", type=int, default=512)
-    parser.add_argument("--base_task_think_max_new_tokens", type=int, default=1024)
-    parser.add_argument("--record_token_usage", action=argparse.BooleanOptionalAction, default=PROJECT_SETTINGS.token_budget.record_token_usage)
-    parser.add_argument("--fewshot_k", type=int, default=2)
-    parser.add_argument("--protocol_max_attempts", type=int, default=3)
-    parser.add_argument("--protocol_temperature", type=float, default=0.2)
-    parser.add_argument("--structured_temperature", type=float, default=0.2)
-    parser.add_argument("--task_temperature", type=float, default=0.0)
+    parser.add_argument("--structured_batch_size", type=int, default=None)
+    parser.add_argument("--task_batch_size", type=int, default=None)
+    parser.add_argument("--max_length", type=int, default=None)
+    parser.add_argument("--structured_max_new_tokens", type=int, default=None)
+    parser.add_argument("--structured_max_attempts", type=int, default=None)
+    parser.add_argument("--base_protocol_max_new_tokens", type=int, default=None)
+    parser.add_argument("--base_task_max_new_tokens", type=int, default=None)
+    parser.add_argument("--base_task_think_max_new_tokens", type=int, default=None)
+    parser.add_argument("--record_token_usage", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--fewshot_k", type=int, default=None)
+    parser.add_argument("--protocol_max_attempts", type=int, default=None)
+    parser.add_argument("--protocol_temperature", type=float, default=None)
+    parser.add_argument("--structured_temperature", type=float, default=None)
+    parser.add_argument("--task_temperature", type=float, default=None)
 
-    parser.add_argument("--parse_ok_threshold", type=float, default=0.95)
-    parser.add_argument("--protocol_ok_threshold", type=float, default=0.98)
-    parser.add_argument("--evidence_ok_threshold", type=float, default=0.95)
+    parser.add_argument("--parse_ok_threshold", type=float, default=None)
+    parser.add_argument("--protocol_ok_threshold", type=float, default=None)
+    parser.add_argument("--evidence_ok_threshold", type=float, default=None)
 
-    parser.add_argument("--enable_semantics", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--semantic_decision_source", type=str, default="full_binary", choices=["full_binary", "reject_aware"])
-    parser.add_argument("--semantic_match_f1_threshold", type=float, default=CorrectnessConfig.semantic_match_f1_threshold)
-    parser.add_argument("--nli_model_name", type=str, default=NLIConfig.model_name)
-    parser.add_argument("--nli_device", type=str, default=NLIConfig.device)
-    parser.add_argument("--nli_batch_size", type=int, default=NLIConfig.batch_size)
-    parser.add_argument("--nli_max_length", type=int, default=NLIConfig.max_length)
-    parser.add_argument("--nli_fp16", action=argparse.BooleanOptionalAction, default=NLIConfig.fp16)
-    parser.add_argument("--temperature", type=float, default=JudgeConfig.temperature)
-    parser.add_argument("--full_margin_threshold", type=float, default=JudgeConfig.full_margin_threshold)
-    parser.add_argument("--reject_margin_threshold", type=float, default=JudgeConfig.reject_margin_threshold)
-    parser.add_argument("--reject_band_half_width", type=float, default=JudgeConfig.reject_band_half_width)
-    parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_fail_as_negative)
-    parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_check_answer_type)
-    parser.add_argument("--qa_spacy_model", type=str, default=JudgeConfig.qa_spacy_model)
-    parser.add_argument("--matcher_model_name", type=str, default=TransformerMatcherConfig.model_name)
-    parser.add_argument("--matcher_threshold", type=float, default=TransformerMatcherConfig.threshold)
+    parser.add_argument("--enable_semantics", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--semantic_decision_source", type=str, default=None, choices=["full_binary", "reject_aware"])
+    parser.add_argument("--semantic_match_f1_threshold", type=float, default=None)
+    parser.add_argument("--nli_model_name", type=str, default=None)
+    parser.add_argument("--nli_device", type=str, default=None)
+    parser.add_argument("--nli_batch_size", type=int, default=None)
+    parser.add_argument("--nli_max_length", type=int, default=None)
+    parser.add_argument("--nli_fp16", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--full_margin_threshold", type=float, default=None)
+    parser.add_argument("--reject_margin_threshold", type=float, default=None)
+    parser.add_argument("--reject_band_half_width", type=float, default=None)
+    parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--qa_spacy_model", type=str, default=None)
+    parser.add_argument("--matcher_model_name", type=str, default=None)
+    parser.add_argument("--matcher_threshold", type=float, default=None)
 
-    parser.add_argument("--api_model_name", type=str, default=AnswerExtractionConfig.api_model_name)
-    parser.add_argument("--api_base_url", type=str, default=AnswerExtractionConfig.api_base_url)
-    parser.add_argument("--api_key_env", type=str, default=AnswerExtractionConfig.api_key_env)
-    parser.add_argument("--api_timeout_seconds", type=float, default=AnswerExtractionConfig.api_timeout_seconds)
-    parser.add_argument("--api_max_concurrency", type=int, default=AnswerExtractionConfig.api_max_concurrency)
-    parser.add_argument("--api_max_retries", type=int, default=AnswerExtractionConfig.api_max_retries)
-    parser.add_argument("--api_backoff_base_seconds", type=float, default=AnswerExtractionConfig.api_backoff_base_seconds)
-    parser.add_argument("--api_backoff_max_seconds", type=float, default=AnswerExtractionConfig.api_backoff_max_seconds)
-    parser.add_argument("--api_extraction_max_new_tokens", type=int, default=AnswerExtractionConfig.max_new_tokens)
-    parser.add_argument("--api_temperature", type=float, default=AnswerExtractionConfig.temperature)
-    parser.add_argument("--api_top_p", type=float, default=AnswerExtractionConfig.top_p)
-    parser.add_argument("--api_seed", type=int, default=AnswerExtractionConfig.seed)
-    parser.add_argument("--error_log_dir", type=str, default=AnswerExtractionConfig.error_log_dir)
-    parser.add_argument("--extraction_max_attempts", type=int, default=AnswerExtractionConfig.max_attempts)
+    parser.add_argument("--api_model_name", type=str, default=None)
+    parser.add_argument("--api_base_url", type=str, default=None)
+    parser.add_argument("--api_key_env", type=str, default=None)
+    parser.add_argument("--api_timeout_seconds", type=float, default=None)
+    parser.add_argument("--api_max_concurrency", type=int, default=None)
+    parser.add_argument("--api_max_retries", type=int, default=None)
+    parser.add_argument("--api_backoff_base_seconds", type=float, default=None)
+    parser.add_argument("--api_backoff_max_seconds", type=float, default=None)
+    parser.add_argument("--api_extraction_max_new_tokens", type=int, default=None)
+    parser.add_argument("--api_temperature", type=float, default=None)
+    parser.add_argument("--api_top_p", type=float, default=None)
+    parser.add_argument("--api_seed", type=int, default=None)
+    parser.add_argument("--error_log_dir", type=str, default=None)
+    parser.add_argument("--extraction_max_attempts", type=int, default=None)
 
-    parser.add_argument("--deepeval_judge_model", type=str, default="gpt-5.2")
-    parser.add_argument("--deepeval_threshold", type=float, default=0.5)
-    parser.add_argument("--deepeval_max_concurrent", type=int, default=4)
-    parser.add_argument("--deepeval_throttle_value", type=float, default=1.0)
-    return parser.parse_args()
+    parser.add_argument("--deepeval_judge_model", type=str, default=None)
+    parser.add_argument("--deepeval_threshold", type=float, default=None)
+    parser.add_argument("--deepeval_max_concurrent", type=int, default=None)
+    parser.add_argument("--deepeval_throttle_value", type=float, default=None)
+    args = parser.parse_args()
+    args = resolve_nli_args(args)
+    args = resolve_matcher_args(args)
+    args = resolve_eval_args(args, preset="selection")
+    if args.seed is None:
+        args.seed = PROJECT_SETTINGS.generation.seed
+    if args.base_model is None:
+        args.base_model = PROJECT_SETTINGS.model.target_training_llm
+    if args.validation_split is None:
+        args.validation_split = PROJECT_SETTINGS.eval.structured_generation.split
+    if args.test_split is None:
+        args.test_split = PROJECT_SETTINGS.eval.flat_generation.split
+    if args.validation_max_samples is None:
+        args.validation_max_samples = PROJECT_SETTINGS.eval.structured_generation.max_samples
+    if args.test_max_samples is None:
+        args.test_max_samples = PROJECT_SETTINGS.eval.flat_generation.max_samples
+    if args.structured_batch_size is None:
+        args.structured_batch_size = PROJECT_SETTINGS.eval.structured_generation.batch_size
+    if args.task_batch_size is None:
+        args.task_batch_size = PROJECT_SETTINGS.eval.flat_generation.batch_size
+    if args.max_length is None:
+        args.max_length = PROJECT_SETTINGS.training.max_length
+    if args.structured_max_new_tokens is None:
+        args.structured_max_new_tokens = PROJECT_SETTINGS.eval.structured_generation.max_new_tokens
+    if args.structured_max_attempts is None:
+        args.structured_max_attempts = 2
+    if args.base_protocol_max_new_tokens is None:
+        args.base_protocol_max_new_tokens = PROJECT_SETTINGS.eval.structured_generation.max_new_tokens
+    if args.base_task_max_new_tokens is None:
+        args.base_task_max_new_tokens = PROJECT_SETTINGS.eval.flat_generation.max_new_tokens
+    if args.base_task_think_max_new_tokens is None:
+        args.base_task_think_max_new_tokens = PROJECT_SETTINGS.eval.flat_generation.think_max_new_tokens
+    if args.record_token_usage is None:
+        args.record_token_usage = PROJECT_SETTINGS.token_budget.record_token_usage
+    if args.fewshot_k is None:
+        args.fewshot_k = PROJECT_SETTINGS.eval.structured_generation.fewshot_k
+    if args.protocol_max_attempts is None:
+        args.protocol_max_attempts = 3
+    if args.protocol_temperature is None:
+        args.protocol_temperature = PROJECT_SETTINGS.teacher_api.temperature
+    if args.structured_temperature is None:
+        args.structured_temperature = PROJECT_SETTINGS.teacher_api.temperature
+    if args.task_temperature is None:
+        args.task_temperature = PROJECT_SETTINGS.eval.flat_generation.temperature
+    if args.enable_semantics is None:
+        args.enable_semantics = PROJECT_SETTINGS.eval.grounded.enable_semantics
+    if args.semantic_decision_source is None:
+        args.semantic_decision_source = PROJECT_SETTINGS.eval.grounded.semantic_decision_source
+    if args.semantic_match_f1_threshold is None:
+        args.semantic_match_f1_threshold = PROJECT_SETTINGS.correctness.semantic_match_f1_threshold
+    if args.api_model_name is None:
+        args.api_model_name = PROJECT_SETTINGS.answer_extraction_api.model_name
+    if args.api_base_url is None:
+        args.api_base_url = PROJECT_SETTINGS.answer_extraction_api.base_url
+    if args.api_key_env is None:
+        args.api_key_env = PROJECT_SETTINGS.answer_extraction_api.api_key_env
+    if args.api_timeout_seconds is None:
+        args.api_timeout_seconds = PROJECT_SETTINGS.answer_extraction_api.timeout_seconds
+    if args.api_max_concurrency is None:
+        args.api_max_concurrency = PROJECT_SETTINGS.answer_extraction_api.max_concurrency
+    if args.api_max_retries is None:
+        args.api_max_retries = PROJECT_SETTINGS.answer_extraction_api.max_retries
+    if args.api_backoff_base_seconds is None:
+        args.api_backoff_base_seconds = PROJECT_SETTINGS.answer_extraction_api.backoff_base_seconds
+    if args.api_backoff_max_seconds is None:
+        args.api_backoff_max_seconds = PROJECT_SETTINGS.answer_extraction_api.backoff_max_seconds
+    if args.api_extraction_max_new_tokens is None:
+        args.api_extraction_max_new_tokens = PROJECT_SETTINGS.answer_extraction_api.max_tokens
+    if args.api_temperature is None:
+        args.api_temperature = PROJECT_SETTINGS.answer_extraction_api.temperature
+    if args.api_top_p is None:
+        args.api_top_p = PROJECT_SETTINGS.answer_extraction_api.top_p
+    if args.api_seed is None:
+        args.api_seed = PROJECT_SETTINGS.answer_extraction_api.seed
+    if args.error_log_dir is None:
+        args.error_log_dir = PROJECT_SETTINGS.paths.error_log_dir
+    if args.extraction_max_attempts is None:
+        args.extraction_max_attempts = PROJECT_SETTINGS.answer_extraction_api.max_attempts
+    if args.deepeval_judge_model is None:
+        args.deepeval_judge_model = PROJECT_SETTINGS.eval.deepeval.judge_model
+    if args.deepeval_threshold is None:
+        args.deepeval_threshold = PROJECT_SETTINGS.eval.deepeval.threshold
+    if args.deepeval_max_concurrent is None:
+        args.deepeval_max_concurrent = PROJECT_SETTINGS.eval.deepeval.max_concurrent
+    if args.deepeval_throttle_value is None:
+        args.deepeval_throttle_value = PROJECT_SETTINGS.eval.deepeval.throttle_value
+    return args
 
 
 def _ensure_dir(path: Path) -> None:

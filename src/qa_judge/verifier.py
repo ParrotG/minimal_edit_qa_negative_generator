@@ -7,6 +7,7 @@ import typer
 from rich.console import Console
 
 from dataio import optional_str, read_jsonl_list, require_non_empty_str, write_json, write_jsonl
+from project_config import PROJECT_SETTINGS
 from .config import NLIConfig
 from .nli import NLIVerifier
 from prompt import build_qa_premise
@@ -54,16 +55,16 @@ def run(
     batch_size: int = typer.Option(NLIConfig.batch_size, help="NLI batch size."),
     max_length: int = typer.Option(NLIConfig.max_length, help="NLI max length."),
     fp16: bool = typer.Option(NLIConfig.fp16, help="Whether to enable fp16 on CUDA."),
-    support_entail_threshold: float = typer.Option(0.60, help="Entailment threshold for predicting supported."),
+    support_entail_threshold: float = typer.Option(PROJECT_SETTINGS.verifier.support_entail_threshold, help="Entailment threshold for predicting supported."),
     support_contradict_threshold: float = typer.Option(
-        0.90,
+        PROJECT_SETTINGS.verifier.support_contradict_threshold,
         help="Contradiction upper threshold for predicting supported.",
     ),
-    knowledge_field: str = typer.Option("knowledge", help="Knowledge field name."),
-    question_field: str = typer.Option("question", help="Question field name."),
-    chosen_field: str = typer.Option("chosen", help="Chosen-answer field name."),
-    rejected_field: str = typer.Option("rejected", help="Rejected-answer field name (optional)."),
-    skip_empty_rejected: bool = typer.Option(True, help="Skip rejected verification when rejected field is empty."),
+    knowledge_field: str = typer.Option(PROJECT_SETTINGS.verifier.knowledge_field, help="Knowledge field name."),
+    question_field: str = typer.Option(PROJECT_SETTINGS.verifier.question_field, help="Question field name."),
+    chosen_field: str = typer.Option(PROJECT_SETTINGS.verifier.chosen_field, help="Chosen-answer field name."),
+    rejected_field: str = typer.Option(PROJECT_SETTINGS.verifier.rejected_field, help="Rejected-answer field name (optional)."),
+    skip_empty_rejected: bool = typer.Option(PROJECT_SETTINGS.verifier.skip_empty_rejected, help="Skip rejected verification when rejected field is empty."),
 ) -> None:
     """Verify NLI support for chosen/rejected and report deviation from field-implied labels."""
 

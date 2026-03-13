@@ -11,6 +11,7 @@ from deepeval.test_case import LLMTestCase
 from deepeval.models import GPTModel
 
 from dataio import write_jsonl
+from project_config.resolve import resolve_eval_args
 from .common import extract_structured_output_text, load_dataset_split, load_generated_rows, write_csv
 
 
@@ -19,34 +20,34 @@ def parse_args() -> argparse.Namespace:
 
     # Input generated answers
     parser.add_argument("--generated_path", type=str, required=True, help="Generated answers JSONL or dataset path.")
-    parser.add_argument("--split", type=str, default="train", help="Split name when generated_path is a DatasetDict.")
-    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum evaluated rows. -1 means all.")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--split", type=str, default=None, help="Split name when generated_path is a DatasetDict.")
+    parser.add_argument("--max_samples", type=int, default=None, help="Maximum evaluated rows. -1 means all.")
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
         "--input_mode",
         type=str,
-        default="flat",
+        default=None,
         choices=["flat", "structured"],
         help="Whether generated_path contains plain answers or structured generations.",
     )
     parser.add_argument(
         "--answer_source",
         type=str,
-        default="answer",
+        default=None,
         choices=["answer", "rationale_plus_answer"],
         help="Select the evaluated text source for flat mode.",
     )
 
     # DeepEval Hallucination metric
-    parser.add_argument("--judge_model", type=str, default="gpt-5.2")
-    parser.add_argument("--threshold", type=float, default=0.5)
-    parser.add_argument("--max_concurrent", type=int, default=4)
-    parser.add_argument("--throttle_value", type=float, default=3.0)
+    parser.add_argument("--judge_model", type=str, default=None)
+    parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument("--max_concurrent", type=int, default=None)
+    parser.add_argument("--throttle_value", type=float, default=None)
 
     # Outputs
     parser.add_argument("--metrics_out", type=str, required=True, help="Summary metrics CSV output path.")
     parser.add_argument("--details_out", type=str, default=None, help="Optional per-sample details JSONL path.")
-    return parser.parse_args()
+    return resolve_eval_args(parser.parse_args(), preset="deepeval")
 
 
 def _chunked(items: List[LLMTestCase], size: int) -> List[List[LLMTestCase]]:

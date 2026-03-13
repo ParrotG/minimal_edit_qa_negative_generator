@@ -5,7 +5,7 @@ import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dataio import write_json, write_jsonl
-from project_config import PROJECT_SETTINGS
+from project_config.resolve import resolve_calibration_args, resolve_matcher_args, resolve_nli_args
 from qa_judge.config import NLIConfig
 from qa_judge.nli import NLIVerifier
 
@@ -27,65 +27,69 @@ from .common import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, required=True, help="Human-annotated JSONL or DatasetDict path.")
-    parser.add_argument("--split", type=str, default="train", help="Split name when data_path is a DatasetDict.")
-    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum rows to evaluate. -1 means all.")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--split", type=str, default=None, help="Split name when data_path is a DatasetDict.")
+    parser.add_argument("--max_samples", type=int, default=None, help="Maximum rows to evaluate. -1 means all.")
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
         "--group_by",
         type=str,
-        default=PROJECT_SETTINGS.calibration.group_by,
+        default=None,
         choices=["task", "task_and_model"],
         help="Calibration aggregation granularity. Defaults to task-level calibration.",
     )
     parser.add_argument(
         "--search_objective",
         type=str,
-        default=PROJECT_SETTINGS.calibration.search_objective,
+        default=None,
         choices=["cohen_kappa", "f1", "accuracy"],
     )
     parser.add_argument(
         "--enable_nli_reject_search",
         action=argparse.BooleanOptionalAction,
-        default=PROJECT_SETTINGS.calibration.enable_nli_reject_search,
+        default=None,
         help="Whether to include reject-based NLI search strategies. Disabled by default.",
     )
-    parser.add_argument("--reject_alpha", type=float, default=PROJECT_SETTINGS.calibration.reject_alpha)
+    parser.add_argument("--reject_alpha", type=float, default=None)
 
-    parser.add_argument("--nli_model_name", type=str, default=NLIConfig.model_name)
-    parser.add_argument("--nli_device", type=str, default=NLIConfig.device)
-    parser.add_argument("--nli_batch_size", type=int, default=NLIConfig.batch_size)
-    parser.add_argument("--nli_max_length", type=int, default=NLIConfig.max_length)
-    parser.add_argument("--nli_fp16", action=argparse.BooleanOptionalAction, default=NLIConfig.fp16)
-    parser.add_argument("--temperature_min", type=float, default=0.05)
-    parser.add_argument("--temperature_max", type=float, default=5.0)
-    parser.add_argument("--temperature_step", type=float, default=0.01)
+    parser.add_argument("--nli_model_name", type=str, default=None)
+    parser.add_argument("--nli_device", type=str, default=None)
+    parser.add_argument("--nli_batch_size", type=int, default=None)
+    parser.add_argument("--nli_max_length", type=int, default=None)
+    parser.add_argument("--nli_fp16", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--temperature_min", type=float, default=None)
+    parser.add_argument("--temperature_max", type=float, default=None)
+    parser.add_argument("--temperature_step", type=float, default=None)
 
     parser.add_argument("--margin_threshold_values", type=str, default="")
-    parser.add_argument("--margin_threshold_min", type=float, default=PROJECT_SETTINGS.calibration.margin_threshold_min)
-    parser.add_argument("--margin_threshold_max", type=float, default=PROJECT_SETTINGS.calibration.margin_threshold_max)
-    parser.add_argument("--margin_threshold_step", type=float, default=PROJECT_SETTINGS.calibration.margin_threshold_step)
+    parser.add_argument("--margin_threshold_min", type=float, default=None)
+    parser.add_argument("--margin_threshold_max", type=float, default=None)
+    parser.add_argument("--margin_threshold_step", type=float, default=None)
 
     parser.add_argument("--argmax_conf_threshold_values", type=str, default="")
-    parser.add_argument("--argmax_conf_threshold_min", type=float, default=PROJECT_SETTINGS.calibration.argmax_conf_threshold_min)
-    parser.add_argument("--argmax_conf_threshold_max", type=float, default=PROJECT_SETTINGS.calibration.argmax_conf_threshold_max)
-    parser.add_argument("--argmax_conf_threshold_step", type=float, default=PROJECT_SETTINGS.calibration.argmax_conf_threshold_step)
+    parser.add_argument("--argmax_conf_threshold_min", type=float, default=None)
+    parser.add_argument("--argmax_conf_threshold_max", type=float, default=None)
+    parser.add_argument("--argmax_conf_threshold_step", type=float, default=None)
 
     parser.add_argument("--band_half_width_values", type=str, default="")
-    parser.add_argument("--band_half_width_min", type=float, default=PROJECT_SETTINGS.calibration.band_half_width_min)
-    parser.add_argument("--band_half_width_max", type=float, default=PROJECT_SETTINGS.calibration.band_half_width_max)
-    parser.add_argument("--band_half_width_step", type=float, default=PROJECT_SETTINGS.calibration.band_half_width_step)
+    parser.add_argument("--band_half_width_min", type=float, default=None)
+    parser.add_argument("--band_half_width_max", type=float, default=None)
+    parser.add_argument("--band_half_width_step", type=float, default=None)
 
-    parser.add_argument("--matcher_model_name", type=str, default=TransformerMatcherConfig.model_name)
+    parser.add_argument("--matcher_model_name", type=str, default=None)
     parser.add_argument("--matcher_threshold_values", type=str, default="")
-    parser.add_argument("--matcher_threshold_min", type=float, default=PROJECT_SETTINGS.calibration.matcher_threshold_min)
-    parser.add_argument("--matcher_threshold_max", type=float, default=PROJECT_SETTINGS.calibration.matcher_threshold_max)
-    parser.add_argument("--matcher_threshold_step", type=float, default=PROJECT_SETTINGS.calibration.matcher_threshold_step)
+    parser.add_argument("--matcher_threshold_min", type=float, default=None)
+    parser.add_argument("--matcher_threshold_max", type=float, default=None)
+    parser.add_argument("--matcher_threshold_step", type=float, default=None)
 
     parser.add_argument("--out_jsonl", type=str, required=True, help="Per-row scored output JSONL.")
     parser.add_argument("--summary_csv", type=str, required=True, help="Summary CSV output.")
     parser.add_argument("--summary_json", type=str, default="", help="Optional summary JSON output.")
     parser.add_argument("--best_out", type=str, required=True, help="Best-parameter JSON output.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args = resolve_calibration_args(args, preset="evaluate_pack")
+    args = resolve_nli_args(args)
+    args = resolve_matcher_args(args)
+    return args
 
 
 def _group_meta_from_key(group_key: Tuple[Any, ...], group_by: str) -> Dict[str, Any]:

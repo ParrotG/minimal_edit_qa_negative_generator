@@ -723,11 +723,12 @@ def validate_mixed_teacher_candidates(
     selected_out_path: Optional[str],
     metrics_out: Optional[str],
     validation_cfg: ValidationConfig,
-    correctness_cfg: CorrectnessConfig = CorrectnessConfig(),
+    correctness_cfg: CorrectnessConfig | None = None,
     spec: ProtocolSpec = DEFAULT_PROTOCOL_SPEC,
 ) -> Dict[str, Any]:
     """Validate mixed teacher candidates by dispatching on answerability_label."""
 
+    resolved_correctness_cfg = correctness_cfg or CorrectnessConfig()
     if validation_cfg.semantic_decision_source not in {"full_binary", "reject_aware"}:
         raise ValueError(f"Unsupported semantic_decision_source: {validation_cfg.semantic_decision_source}")
 
@@ -749,7 +750,7 @@ def validate_mixed_teacher_candidates(
     answerable_annotated, answerable_selected, answerable_metrics = validate_answerable_candidates(
         answerable_rows,
         validation_cfg=validation_cfg,
-        correctness_cfg=correctness_cfg,
+        correctness_cfg=resolved_correctness_cfg,
         spec=spec,
     )
     unanswerable_annotated, unanswerable_selected, unanswerable_metrics = validate_unanswerable_candidates(

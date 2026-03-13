@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dataio import write_jsonl
 from llm_textgen.api_client import OpenAICompatibleTextGenerator
+from project_config import PROJECT_SETTINGS
+from project_config.resolve import resolve_eval_args, resolve_matcher_args, resolve_nli_args
 from qa_checks import CorrectnessConfig, check_answer_correctness
 from qa_judge.config import JudgeConfig, NLIConfig
 from qa_judge.judge import AnswerJudge
@@ -29,42 +31,64 @@ from .correctness_transformer_matcher import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generated_path", type=str, required=True, help="Generated answers JSONL or dataset path.")
-    parser.add_argument("--split", type=str, default="train", help="Split name when generated_path is a DatasetDict.")
-    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum evaluated rows per run. -1 means all.")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--semantic_decision_source", type=str, default="full_binary", choices=["full_binary", "reject_aware"])
-    parser.add_argument("--semantic_match_f1_threshold", type=float, default=0.85)
-    parser.add_argument("--nli_model_name", type=str, default=NLIConfig.model_name)
-    parser.add_argument("--nli_device", type=str, default=NLIConfig.device)
-    parser.add_argument("--nli_batch_size", type=int, default=NLIConfig.batch_size)
-    parser.add_argument("--nli_max_length", type=int, default=NLIConfig.max_length)
-    parser.add_argument("--nli_fp16", action=argparse.BooleanOptionalAction, default=NLIConfig.fp16)
-    parser.add_argument("--temperature", type=float, default=JudgeConfig.temperature)
-    parser.add_argument("--full_margin_threshold", type=float, default=JudgeConfig.full_margin_threshold)
-    parser.add_argument("--reject_margin_threshold", type=float, default=JudgeConfig.reject_margin_threshold)
-    parser.add_argument("--reject_band_half_width", type=float, default=JudgeConfig.reject_band_half_width)
-    parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_fail_as_negative)
-    parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_check_answer_type)
-    parser.add_argument("--qa_spacy_model", type=str, default=JudgeConfig.qa_spacy_model)
-    parser.add_argument("--matcher_model_name", type=str, default=TransformerMatcherConfig.model_name)
-    parser.add_argument("--matcher_threshold", type=float, default=TransformerMatcherConfig.threshold)
-    parser.add_argument("--api_model_name", type=str, default=AnswerExtractionConfig.api_model_name)
-    parser.add_argument("--api_base_url", type=str, default=AnswerExtractionConfig.api_base_url)
-    parser.add_argument("--api_key_env", type=str, default=AnswerExtractionConfig.api_key_env)
-    parser.add_argument("--api_timeout_seconds", type=float, default=AnswerExtractionConfig.api_timeout_seconds)
-    parser.add_argument("--api_max_concurrency", type=int, default=AnswerExtractionConfig.api_max_concurrency)
-    parser.add_argument("--api_max_retries", type=int, default=AnswerExtractionConfig.api_max_retries)
-    parser.add_argument("--api_backoff_base_seconds", type=float, default=AnswerExtractionConfig.api_backoff_base_seconds)
-    parser.add_argument("--api_backoff_max_seconds", type=float, default=AnswerExtractionConfig.api_backoff_max_seconds)
-    parser.add_argument("--api_max_new_tokens", type=int, default=AnswerExtractionConfig.max_new_tokens)
-    parser.add_argument("--api_temperature", type=float, default=AnswerExtractionConfig.temperature)
-    parser.add_argument("--api_top_p", type=float, default=AnswerExtractionConfig.top_p)
-    parser.add_argument("--api_seed", type=int, default=AnswerExtractionConfig.seed)
-    parser.add_argument("--error_log_dir", type=str, default=AnswerExtractionConfig.error_log_dir)
-    parser.add_argument("--extraction_max_attempts", type=int, default=AnswerExtractionConfig.max_attempts)
+    parser.add_argument("--split", type=str, default=None, help="Split name when generated_path is a DatasetDict.")
+    parser.add_argument("--max_samples", type=int, default=None, help="Maximum evaluated rows per run. -1 means all.")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--semantic_decision_source", type=str, default=None, choices=["full_binary", "reject_aware"])
+    parser.add_argument("--semantic_match_f1_threshold", type=float, default=None)
+    parser.add_argument("--nli_model_name", type=str, default=None)
+    parser.add_argument("--nli_device", type=str, default=None)
+    parser.add_argument("--nli_batch_size", type=int, default=None)
+    parser.add_argument("--nli_max_length", type=int, default=None)
+    parser.add_argument("--nli_fp16", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--full_margin_threshold", type=float, default=None)
+    parser.add_argument("--reject_margin_threshold", type=float, default=None)
+    parser.add_argument("--reject_band_half_width", type=float, default=None)
+    parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--qa_spacy_model", type=str, default=None)
+    parser.add_argument("--matcher_model_name", type=str, default=None)
+    parser.add_argument("--matcher_threshold", type=float, default=None)
+    parser.add_argument("--api_model_name", type=str, default=None)
+    parser.add_argument("--api_base_url", type=str, default=None)
+    parser.add_argument("--api_key_env", type=str, default=None)
+    parser.add_argument("--api_timeout_seconds", type=float, default=None)
+    parser.add_argument("--api_max_concurrency", type=int, default=None)
+    parser.add_argument("--api_max_retries", type=int, default=None)
+    parser.add_argument("--api_backoff_base_seconds", type=float, default=None)
+    parser.add_argument("--api_backoff_max_seconds", type=float, default=None)
+    parser.add_argument("--api_max_new_tokens", type=int, default=None)
+    parser.add_argument("--api_temperature", type=float, default=None)
+    parser.add_argument("--api_top_p", type=float, default=None)
+    parser.add_argument("--api_seed", type=int, default=None)
+    parser.add_argument("--error_log_dir", type=str, default=None)
+    parser.add_argument("--extraction_max_attempts", type=int, default=None)
     parser.add_argument("--metrics_out", type=str, required=True, help="Per-model summary CSV path.")
     parser.add_argument("--details_out", type=str, default=None, help="Optional per-sample details JSONL path.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args = resolve_eval_args(args, preset="task_baseline")
+    args = resolve_nli_args(args)
+    args = resolve_matcher_args(args)
+    for name, fallback in (
+        ("api_model_name", PROJECT_SETTINGS.answer_extraction_api.model_name),
+        ("api_base_url", PROJECT_SETTINGS.answer_extraction_api.base_url),
+        ("api_key_env", PROJECT_SETTINGS.answer_extraction_api.api_key_env),
+        ("api_timeout_seconds", PROJECT_SETTINGS.answer_extraction_api.timeout_seconds),
+        ("api_max_concurrency", PROJECT_SETTINGS.answer_extraction_api.max_concurrency),
+        ("api_max_retries", PROJECT_SETTINGS.answer_extraction_api.max_retries),
+        ("api_backoff_base_seconds", PROJECT_SETTINGS.answer_extraction_api.backoff_base_seconds),
+        ("api_backoff_max_seconds", PROJECT_SETTINGS.answer_extraction_api.backoff_max_seconds),
+        ("api_max_new_tokens", PROJECT_SETTINGS.answer_extraction_api.max_tokens),
+        ("api_temperature", PROJECT_SETTINGS.answer_extraction_api.temperature),
+        ("api_top_p", PROJECT_SETTINGS.answer_extraction_api.top_p),
+        ("api_seed", PROJECT_SETTINGS.answer_extraction_api.seed),
+        ("error_log_dir", PROJECT_SETTINGS.paths.error_log_dir),
+        ("extraction_max_attempts", PROJECT_SETTINGS.answer_extraction_api.max_attempts),
+    ):
+        if getattr(args, name) is None:
+            setattr(args, name, fallback)
+    return args
 
 
 def _safe_rate(numerator: int, denominator: int) -> float:

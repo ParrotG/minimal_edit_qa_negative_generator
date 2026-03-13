@@ -5,18 +5,19 @@ from dataclasses import dataclass
 from typing import Dict, Iterator, Optional
 
 from datasets import load_dataset
+from project_config import PROJECT_SETTINGS
 
 
 @dataclass(frozen=True)
 class HotpotSourceConfig:
     """Configuration for loading HotpotQA source rows for SFT-only tagging."""
 
-    dataset_name: str = "hotpotqa/hotpot_qa"
-    train_split: str = "train"
-    validation_split: str = "validation"
-    max_train_samples: int = -1
-    max_validation_samples: int = -1
-    seed: int = 42
+    dataset_name: str = PROJECT_SETTINGS.source.dataset_name
+    train_split: str = PROJECT_SETTINGS.source.train_split
+    validation_split: str = PROJECT_SETTINGS.source.validation_split
+    max_train_samples: int = PROJECT_SETTINGS.source.max_train_samples
+    max_validation_samples: int = PROJECT_SETTINGS.source.max_validation_samples
+    seed: int = PROJECT_SETTINGS.source.seed
 
 
 def iter_hotpot_rows(

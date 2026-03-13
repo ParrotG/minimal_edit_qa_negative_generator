@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
-from project_config import PROJECT_SETTINGS
+from project_config.resolve import resolve_eval_args
 
 try:
     from src.llm_textgen import GeneratorModelSpec, build_generator_model_specs, load_generator_from_spec
@@ -21,10 +21,10 @@ from .common import load_dataset_split, write_csv
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, required=True, help="Dataset path (save_to_disk dir or JSON/JSONL).")
-    parser.add_argument("--split", type=str, default="validation", help="Split name when data_path is a DatasetDict.")
-    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum sampled rows. -1 means all.")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--base_model", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
+    parser.add_argument("--split", type=str, default=None, help="Split name when data_path is a DatasetDict.")
+    parser.add_argument("--max_samples", type=int, default=None, help="Maximum sampled rows. -1 means all.")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--base_model", type=str, default=None)
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="Single LoRA adapter checkpoint path.")
     parser.add_argument(
         "--lora_ckpt_list_path",
@@ -32,14 +32,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory containing checkpoint-* subdirectories, or a text file with checkpoint paths.",
     )
-    parser.add_argument("--include_base", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--max_length", type=int, default=1024)
-    parser.add_argument("--eval_track", type=str, default="sft_structured", help="Evaluation track label written into the curve rows.")
-    parser.add_argument("--eval_variant", type=str, default="checkpoint", help="Evaluation variant label written into the curve rows.")
+    parser.add_argument("--include_base", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--max_length", type=int, default=None)
+    parser.add_argument("--eval_track", type=str, default=None, help="Evaluation track label written into the curve rows.")
+    parser.add_argument("--eval_variant", type=str, default=None, help="Evaluation variant label written into the curve rows.")
     parser.add_argument("--out_csv", type=str, required=True, help="Per-model loss curve CSV path.")
     parser.add_argument("--details_out", type=str, default=None, help="Optional per-sample loss details JSONL path.")
-    return parser.parse_args()
+    return resolve_eval_args(parser.parse_args(), preset="loss_curve")
 
 
 def _extract_eval_rows(data_path: str, split: str, max_samples: int, seed: int) -> List[Dict[str, Any]]:

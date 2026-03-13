@@ -5,6 +5,7 @@ import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dataio import write_json, write_jsonl
+from project_config.resolve import resolve_eval_args, resolve_matcher_args, resolve_nli_args
 from qa_checks import (
     CorrectnessConfig,
     SemanticCheckReport,
@@ -34,30 +35,34 @@ from .correctness_transformer_matcher import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generated_path", type=str, required=True, help="Generated structured outputs JSONL or dataset path.")
-    parser.add_argument("--split", type=str, default="train", help="Split name when generated_path is a DatasetDict.")
-    parser.add_argument("--max_samples", type=int, default=-1, help="Maximum evaluated samples by unique source/sample id. -1 means all.")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--enable_semantics", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--semantic_decision_source", type=str, default="full_binary", choices=["full_binary", "reject_aware"])
-    parser.add_argument("--semantic_match_f1_threshold", type=float, default=0.85)
-    parser.add_argument("--nli_model_name", type=str, default=NLIConfig.model_name)
-    parser.add_argument("--nli_device", type=str, default=NLIConfig.device)
-    parser.add_argument("--nli_batch_size", type=int, default=NLIConfig.batch_size)
-    parser.add_argument("--nli_max_length", type=int, default=NLIConfig.max_length)
-    parser.add_argument("--nli_fp16", action=argparse.BooleanOptionalAction, default=NLIConfig.fp16)
-    parser.add_argument("--temperature", type=float, default=JudgeConfig.temperature)
-    parser.add_argument("--full_margin_threshold", type=float, default=JudgeConfig.full_margin_threshold)
-    parser.add_argument("--reject_margin_threshold", type=float, default=JudgeConfig.reject_margin_threshold)
-    parser.add_argument("--reject_band_half_width", type=float, default=JudgeConfig.reject_band_half_width)
-    parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_fail_as_negative)
-    parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=JudgeConfig.qa_check_answer_type)
-    parser.add_argument("--qa_spacy_model", type=str, default=JudgeConfig.qa_spacy_model)
-    parser.add_argument("--matcher_model_name", type=str, default=TransformerMatcherConfig.model_name)
-    parser.add_argument("--matcher_threshold", type=float, default=TransformerMatcherConfig.threshold)
+    parser.add_argument("--split", type=str, default=None, help="Split name when generated_path is a DatasetDict.")
+    parser.add_argument("--max_samples", type=int, default=None, help="Maximum evaluated samples by unique source/sample id. -1 means all.")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--enable_semantics", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--semantic_decision_source", type=str, default=None, choices=["full_binary", "reject_aware"])
+    parser.add_argument("--semantic_match_f1_threshold", type=float, default=None)
+    parser.add_argument("--nli_model_name", type=str, default=None)
+    parser.add_argument("--nli_device", type=str, default=None)
+    parser.add_argument("--nli_batch_size", type=int, default=None)
+    parser.add_argument("--nli_max_length", type=int, default=None)
+    parser.add_argument("--nli_fp16", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--full_margin_threshold", type=float, default=None)
+    parser.add_argument("--reject_margin_threshold", type=float, default=None)
+    parser.add_argument("--reject_band_half_width", type=float, default=None)
+    parser.add_argument("--qa_fail_as_negative", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--qa_check_answer_type", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--qa_spacy_model", type=str, default=None)
+    parser.add_argument("--matcher_model_name", type=str, default=None)
+    parser.add_argument("--matcher_threshold", type=float, default=None)
     parser.add_argument("--metrics_out", type=str, required=True, help="Per-model summary CSV path.")
     parser.add_argument("--details_out", type=str, default=None, help="Optional per-sample details JSONL path.")
     parser.add_argument("--confidence_out", type=str, default=None, help="Optional confidence correlation JSON path.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args = resolve_eval_args(args, preset="grounded")
+    args = resolve_nli_args(args)
+    args = resolve_matcher_args(args)
+    return args
 
 
 def _safe_rate(numerator: int, denominator: int) -> float:

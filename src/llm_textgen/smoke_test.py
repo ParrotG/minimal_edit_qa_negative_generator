@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from typing import List
 
+from project_config import PROJECT_SETTINGS
 from .config import UnifiedLLMConfig
 from .generator import UnifiedTextGenerator
 from .types import LocalGenerationResult
@@ -10,10 +11,10 @@ from .types import LocalGenerationResult
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Single-run smoke test for unified LLM text generation.")
-    parser.add_argument("--base_model_name", type=str, default=UnifiedLLMConfig.base_model_name)
+    parser.add_argument("--base_model_name", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
     parser.add_argument("--lora_path", type=str, default=None)
-    parser.add_argument("--device", type=str, default=UnifiedLLMConfig.device)
-    parser.add_argument("--device_map", type=str, default=UnifiedLLMConfig.device_map)
+    parser.add_argument("--device", type=str, default=PROJECT_SETTINGS.generation.device)
+    parser.add_argument("--device_map", type=str, default=PROJECT_SETTINGS.generation.device_map)
 
     parser.add_argument("--prompt", type=str, required=True, help="Prompt used for single and batch generation.")
     parser.add_argument(
@@ -22,10 +23,10 @@ def parse_args() -> argparse.Namespace:
         default="Write one short sentence about reliable model loading.",
         help="Optional second prompt used for batch generation.",
     )
-    parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--max_new_tokens", type=int, default=64)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--batch_size", type=int, default=PROJECT_SETTINGS.generation.batch_size)
+    parser.add_argument("--max_new_tokens", type=int, default=PROJECT_SETTINGS.generation.max_new_tokens)
+    parser.add_argument("--temperature", type=float, default=PROJECT_SETTINGS.generation.temperature)
+    parser.add_argument("--top_p", type=float, default=PROJECT_SETTINGS.generation.top_p)
     parser.add_argument(
         "--expect_non_empty",
         action=argparse.BooleanOptionalAction,

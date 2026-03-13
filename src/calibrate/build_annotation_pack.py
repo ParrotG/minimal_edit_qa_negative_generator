@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from dataio import write_json, write_jsonl
-from project_config import PROJECT_SETTINGS
+from project_config.resolve import resolve_calibration_args
 
 from .common import build_annotation_pack_rows, load_dataset_split, summarize_annotation_labels
 
@@ -20,19 +20,19 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Input JSONL or DatasetDict path. Repeat this flag to sample from multiple sources.",
     )
-    parser.add_argument("--split", type=str, default="train", help="Split name when data_path is a DatasetDict.")
+    parser.add_argument("--split", type=str, default=None, help="Split name when data_path is a DatasetDict.")
     parser.add_argument(
         "--task_types",
         type=str,
-        default=",".join(PROJECT_SETTINGS.calibration.annotation_task_types),
+        default=None,
         help="Comma-separated calibration task types.",
     )
-    parser.add_argument("--max_samples_per_task", type=int, default=200, help="Maximum sampled rows for each task type.")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max_samples_per_task", type=int, default=None, help="Maximum sampled rows for each task type.")
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--pack_id", type=str, default="", help="Optional explicit pack identifier.")
     parser.add_argument("--out_jsonl", type=str, required=True, help="Annotation-pack JSONL path.")
     parser.add_argument("--metrics_out", type=str, default="", help="Optional metrics JSON path.")
-    return parser.parse_args()
+    return resolve_calibration_args(parser.parse_args(), preset="annotation_pack")
 
 
 def _row_identity(row: Dict[str, Any]) -> tuple[str, str, int, str, str, str]:

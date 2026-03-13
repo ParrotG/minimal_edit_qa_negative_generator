@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from project_config import PROJECT_SETTINGS
+
 from .config import UnifiedLLMConfig
 from .generator import UnifiedTextGenerator
 
@@ -108,38 +110,38 @@ def load_generator_from_spec(
     *,
     spec: GeneratorModelSpec,
     base_model_name: str,
-    batch_size: int = 4,
-    max_new_tokens: int = 256,
-    temperature: float = 0.0,
-    top_p: float = 1.0,
+    batch_size: Optional[int] = None,
+    max_new_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    top_p: Optional[float] = None,
     top_k: Optional[int] = None,
     min_p: Optional[float] = None,
-    repetition_penalty: float = 1.0,
-    use_chat_template: bool = True,
-    enable_thinking: bool = False,
-    strip_think_tags: bool = True,
-    strip_role_markers: bool = True,
-    record_token_usage: bool = False,
-    seed: int = 42,
+    repetition_penalty: Optional[float] = None,
+    use_chat_template: Optional[bool] = None,
+    enable_thinking: Optional[bool] = None,
+    strip_think_tags: Optional[bool] = None,
+    strip_role_markers: Optional[bool] = None,
+    record_token_usage: Optional[bool] = None,
+    seed: Optional[int] = None,
 ) -> UnifiedTextGenerator:
     """Load UnifiedTextGenerator from one model spec."""
 
     cfg = UnifiedLLMConfig(
         base_model_name=base_model_name,
         lora_path=spec.lora_path,
-        batch_size=batch_size,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
+        batch_size=PROJECT_SETTINGS.generation.batch_size if batch_size is None else batch_size,
+        max_new_tokens=PROJECT_SETTINGS.generation.max_new_tokens if max_new_tokens is None else max_new_tokens,
+        temperature=PROJECT_SETTINGS.generation.temperature if temperature is None else temperature,
+        top_p=PROJECT_SETTINGS.generation.top_p if top_p is None else top_p,
         top_k=top_k,
         min_p=min_p,
-        repetition_penalty=repetition_penalty,
-        use_chat_template=use_chat_template,
-        enable_thinking=enable_thinking,
-        strip_think_tags=strip_think_tags,
-        strip_role_markers=strip_role_markers,
-        record_token_usage=record_token_usage,
-        seed=seed,
+        repetition_penalty=PROJECT_SETTINGS.generation.repetition_penalty if repetition_penalty is None else repetition_penalty,
+        use_chat_template=PROJECT_SETTINGS.generation.use_chat_template if use_chat_template is None else use_chat_template,
+        enable_thinking=PROJECT_SETTINGS.generation.enable_thinking if enable_thinking is None else enable_thinking,
+        strip_think_tags=PROJECT_SETTINGS.generation.strip_think_tags if strip_think_tags is None else strip_think_tags,
+        strip_role_markers=PROJECT_SETTINGS.generation.strip_role_markers if strip_role_markers is None else strip_role_markers,
+        record_token_usage=PROJECT_SETTINGS.token_budget.record_token_usage if record_token_usage is None else record_token_usage,
+        seed=PROJECT_SETTINGS.generation.seed if seed is None else seed,
     )
     generator = UnifiedTextGenerator(config=cfg)
     generator.load_model()

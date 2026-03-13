@@ -4,6 +4,8 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
+from project_config import PROJECT_SETTINGS
+
 from .report import CorrectnessCheckReport
 
 
@@ -14,7 +16,7 @@ _TOKEN_RE = re.compile(r"\w+")
 class CorrectnessConfig:
     """Configuration for simple answer correctness checks."""
 
-    semantic_match_f1_threshold: float = 0.85
+    semantic_match_f1_threshold: float = PROJECT_SETTINGS.correctness.semantic_match_f1_threshold
 
 
 def _normalize_answer(text: str) -> str:
@@ -44,14 +46,15 @@ def check_answer_correctness(
     *,
     answer: str,
     reference_answer: str,
-    cfg: CorrectnessConfig = CorrectnessConfig(),
+    cfg: CorrectnessConfig | None = None,
 ) -> CorrectnessCheckReport:
     """Check answer correctness against the reference answer."""
 
+    resolved_cfg = cfg or CorrectnessConfig()
     issues: list[str] = []
     exact_match = _normalize_answer(answer) == _normalize_answer(reference_answer)
     token_f1 = _token_f1(answer, reference_answer)
-    semantic_match = bool(exact_match or token_f1 >= cfg.semantic_match_f1_threshold)
+    semantic_match = bool(exact_match or token_f1 >= resolved_cfg.semantic_match_f1_threshold)
 
     if not semantic_match:
         issues.append("Answer does not match the reference answer strongly enough.")

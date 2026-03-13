@@ -4,6 +4,8 @@ import hashlib
 from dataclasses import dataclass
 from typing import Dict, Iterator
 
+from project_config import PROJECT_SETTINGS
+
 from .hotpot import HotpotSourceConfig, iter_hotpot_rows
 
 
@@ -11,19 +13,19 @@ from .hotpot import HotpotSourceConfig, iter_hotpot_rows
 class DataSplitConfig:
     """Stable split configuration for downstream SFT training and evaluation stages."""
 
-    validation_ratio: float = 0.5
-    test_ratio: float = 0.5
-    hash_salt: str = "data_split"
+    validation_ratio: float = PROJECT_SETTINGS.source.validation_ratio
+    test_ratio: float = PROJECT_SETTINGS.source.test_ratio
+    hash_salt: str = PROJECT_SETTINGS.source.data_split_hash_salt
 
 
 @dataclass(frozen=True)
 class AnswerabilitySplitConfig:
     """Stable split configuration for answerability-oriented source construction."""
 
-    answerable_ratio: float = 0.8
-    unanswerable_ratio: float = 0.1
-    both_ratio: float = 0.1
-    hash_salt: str = "answerability_split"
+    answerable_ratio: float = PROJECT_SETTINGS.source.answerable_ratio
+    unanswerable_ratio: float = PROJECT_SETTINGS.source.unanswerable_ratio
+    both_ratio: float = PROJECT_SETTINGS.source.both_ratio
+    hash_salt: str = PROJECT_SETTINGS.source.answerability_hash_salt
 
 
 def _stable_ratio(source_id: str, salt: str) -> float:

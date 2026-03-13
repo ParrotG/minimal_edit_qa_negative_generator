@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from project_config import PROJECT_SETTINGS
+
 from .records import ContextDocument, QaExample, SupportingSentence
 
 
@@ -10,10 +12,10 @@ from .records import ContextDocument, QaExample, SupportingSentence
 class ConstructionConfig:
     """Configuration for answerable-example construction from HotpotQA."""
 
-    window_size: int = 1
-    max_supporting_facts: int = 4
-    drop_over_max_supporting_facts: bool = True
-    include_title_prefix: bool = True
+    window_size: int = PROJECT_SETTINGS.source.window_size
+    max_supporting_facts: int = PROJECT_SETTINGS.source.max_supporting_facts
+    drop_over_max_supporting_facts: bool = PROJECT_SETTINGS.source.drop_over_max_supporting_facts
+    include_title_prefix: bool = PROJECT_SETTINGS.source.include_title_prefix
 
 
 def _as_context_documents(row: Dict[str, object]) -> tuple[ContextDocument, ...]:

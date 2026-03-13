@@ -42,15 +42,15 @@ class ApiGenerationConfig:
 
     model_name: str
     base_url: str
-    timeout_seconds: float = 90.0
-    max_concurrency: int = 64
-    max_retries: int = 4
-    backoff_base_seconds: float = 0.5
-    backoff_max_seconds: float = 8.0
-    max_tokens: int = 512
-    temperature: float = 0.2
-    top_p: float = 0.95
-    seed: int = 42
+    timeout_seconds: float = PROJECT_SETTINGS.teacher_api.timeout_seconds
+    max_concurrency: int = PROJECT_SETTINGS.teacher_api.max_concurrency
+    max_retries: int = PROJECT_SETTINGS.teacher_api.max_retries
+    backoff_base_seconds: float = PROJECT_SETTINGS.teacher_api.backoff_base_seconds
+    backoff_max_seconds: float = PROJECT_SETTINGS.teacher_api.backoff_max_seconds
+    max_tokens: int = PROJECT_SETTINGS.teacher_api.max_tokens
+    temperature: float = PROJECT_SETTINGS.teacher_api.temperature
+    top_p: float = PROJECT_SETTINGS.teacher_api.top_p
+    seed: int = PROJECT_SETTINGS.teacher_api.seed
     error_log_dir: str = PROJECT_SETTINGS.paths.error_log_dir
     record_token_usage: bool = PROJECT_SETTINGS.token_budget.record_token_usage
     token_usage_tokenizer_name: str = PROJECT_SETTINGS.model.default_tokenizer_name

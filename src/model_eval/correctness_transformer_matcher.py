@@ -15,8 +15,8 @@ except ImportError:  # pragma: no cover
 class TransformerMatcherConfig:
     """Configuration for qa-metrics TransformerMatcher reviewer."""
 
-    model_name: str = PROJECT_SETTINGS.calibration.matcher_model_name
-    threshold: float = PROJECT_SETTINGS.calibration.matcher_runtime_threshold
+    model_name: str = PROJECT_SETTINGS.matcher.model_name
+    threshold: float = PROJECT_SETTINGS.matcher.runtime_threshold
 
 
 @dataclass(frozen=True)

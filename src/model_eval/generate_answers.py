@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover - compatibility fallback for editable in
     from llm_textgen import GeneratorModelSpec, build_generator_model_specs, load_generator_from_spec
 
 from dataio import write_jsonl
-from project_config import PROJECT_SETTINGS
+from project_config.resolve import resolve_generation_args
 from .common import load_generation_items
 
 
@@ -20,12 +20,12 @@ def parse_args() -> argparse.Namespace:
 
     # Data
     parser.add_argument("--data_path", type=str, required=True, help="Dataset path (save_to_disk dir or JSON/JSONL).")
-    parser.add_argument("--split", type=str, default="test", help="Split name when data_path is a DatasetDict.")
-    parser.add_argument("--max_samples", type=int, default=200, help="Maximum sampled rows. -1 means all.")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--split", type=str, default=None, help="Split name when data_path is a DatasetDict.")
+    parser.add_argument("--max_samples", type=int, default=None, help="Maximum sampled rows. -1 means all.")
+    parser.add_argument("--seed", type=int, default=None)
 
     # Models
-    parser.add_argument("--base_model", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
+    parser.add_argument("--base_model", type=str, default=None)
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="Single LoRA adapter checkpoint path.")
     parser.add_argument(
         "--lora_ckpt_list_path",
@@ -36,30 +36,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include_base",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
         help="Whether to include the base model in generation.",
     )
 
     # Generation
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--max_new_tokens", type=int, default=256)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--max_new_tokens", type=int, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--top_k", type=int, default=None)
     parser.add_argument("--min_p", type=float, default=None)
-    parser.add_argument("--repetition_penalty", type=float, default=1.0)
-    parser.add_argument("--use_chat_template", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--enable_thinking", action="store_true")
-    parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--strip_role_markers", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--encourage_refusal", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--record_token_usage", action=argparse.BooleanOptionalAction, default=PROJECT_SETTINGS.token_budget.record_token_usage)
-    parser.add_argument("--eval_track", type=str, default="base_task", help="Evaluation track label saved into generated rows.")
-    parser.add_argument("--eval_variant", type=str, default="", help="Optional evaluation variant label. Defaults to think/no_think from generation mode.")
+    parser.add_argument("--repetition_penalty", type=float, default=None)
+    parser.add_argument("--use_chat_template", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--enable_thinking", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--strip_role_markers", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--encourage_refusal", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--record_token_usage", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--eval_track", type=str, default=None, help="Evaluation track label saved into generated rows.")
+    parser.add_argument("--eval_variant", type=str, default=None, help="Optional evaluation variant label. Defaults to think/no_think from generation mode.")
 
     # Output
     parser.add_argument("--out_jsonl", type=str, required=True, help="Generated answers JSONL output path.")
-    return parser.parse_args()
+    return resolve_generation_args(parser.parse_args(), preset="flat_eval")
 
 
 def run_answer_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:

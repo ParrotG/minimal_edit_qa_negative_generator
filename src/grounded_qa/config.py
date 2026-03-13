@@ -11,9 +11,9 @@ from qa_judge.config import JudgeConfig, NLIConfig
 class TeacherGenerationConfig:
     """Defaults for teacher candidate generation."""
 
-    prompt_style: str = "teacher_v1"
-    answerable_num_candidates_per_example: int = 3
-    unanswerable_num_candidates_per_example: int = 1
+    prompt_style: str = PROJECT_SETTINGS.teacher.prompt_style
+    answerable_num_candidates_per_example: int = PROJECT_SETTINGS.teacher.answerable_num_candidates_per_example
+    unanswerable_num_candidates_per_example: int = PROJECT_SETTINGS.teacher.unanswerable_num_candidates_per_example
     api_model_name: str = PROJECT_SETTINGS.teacher_api.model_name
     api_base_url: str = PROJECT_SETTINGS.teacher_api.base_url
     api_key_env: str = PROJECT_SETTINGS.teacher_api.api_key_env
@@ -52,8 +52,8 @@ class SourcePrefilterConfig:
     """Source-stage filtering defaults for mixed prepared examples."""
 
     tokenizer_name: str = PROJECT_SETTINGS.model.default_tokenizer_name
-    max_prompt_tokens: int = PROJECT_SETTINGS.protocol.max_prompt_tokens
-    enable_unanswerable_nli: bool = True
+    max_prompt_tokens: int = PROJECT_SETTINGS.token_budget.prompt_limit
+    enable_unanswerable_nli: bool = PROJECT_SETTINGS.source.enable_unanswerable_nli
     nli_model_name: str = NLIConfig.model_name
     nli_device: str = NLIConfig.device
     nli_batch_size: int = NLIConfig.batch_size
@@ -67,16 +67,16 @@ class SourcePrefilterConfig:
 class ValidationConfig:
     """Validation defaults for teacher candidates."""
 
-    enable_semantics: bool = True
-    semantic_drop_by_nli: bool = True
-    semantic_decision_source: str = "full_binary"
+    enable_semantics: bool = PROJECT_SETTINGS.teacher.validate_enable_semantics
+    semantic_drop_by_nli: bool = PROJECT_SETTINGS.teacher.semantic_drop_by_nli
+    semantic_decision_source: str = PROJECT_SETTINGS.teacher.semantic_decision_source
     tokenizer_name: str = PROJECT_SETTINGS.model.default_tokenizer_name
-    max_completion_tokens: int = PROJECT_SETTINGS.protocol.max_completion_tokens
+    max_completion_tokens: int = PROJECT_SETTINGS.token_budget.completion_limit
 
 
 @dataclass(frozen=True)
 class SftRecordConfig:
     """Configuration for SFT record packing."""
 
-    prompt_style: str = "infer_v1"
-    keep_only_overall_ok: bool = True
+    prompt_style: str = PROJECT_SETTINGS.teacher.infer_prompt_style
+    keep_only_overall_ok: bool = PROJECT_SETTINGS.teacher.keep_only_overall_ok

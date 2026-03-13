@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - compatibility fallback for editable in
     from llm_textgen import GeneratorModelSpec, build_generator_model_specs, load_generator_from_spec
 
 from dataio import write_jsonl
-from project_config import PROJECT_SETTINGS
+from project_config.resolve import resolve_generation_args
 from qa_checks import check_protocol_constraints
 from qa_protocol import build_infer_prompt, build_teacher_prompt, parse_structured_output
 
@@ -22,10 +22,10 @@ from .common import load_structured_generation_items
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, required=True, help="Dataset path (save_to_disk dir or JSON/JSONL).")
-    parser.add_argument("--split", type=str, default="validation", help="Split name when data_path is a DatasetDict.")
-    parser.add_argument("--max_samples", type=int, default=200, help="Maximum sampled rows. -1 means all.")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--base_model", type=str, default=PROJECT_SETTINGS.model.target_training_llm)
+    parser.add_argument("--split", type=str, default=None, help="Split name when data_path is a DatasetDict.")
+    parser.add_argument("--max_samples", type=int, default=None, help="Maximum sampled rows. -1 means all.")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--base_model", type=str, default=None)
     parser.add_argument("--lora_ckpt_path", type=str, default=None, help="Single LoRA adapter checkpoint path.")
     parser.add_argument(
         "--lora_ckpt_list_path",
@@ -33,27 +33,27 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory containing checkpoint-* subdirectories, or a text file with checkpoint paths.",
     )
-    parser.add_argument("--include_base", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--max_new_tokens", type=int, default=512)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--include_base", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--max_new_tokens", type=int, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--top_k", type=int, default=None)
     parser.add_argument("--min_p", type=float, default=None)
-    parser.add_argument("--repetition_penalty", type=float, default=1.0)
-    parser.add_argument("--prompt_mode", type=str, default="infer", choices=["infer", "teacher", "teacher_fewshot"])
-    parser.add_argument("--fewshot_k", type=int, default=2, help="Number of few-shot examples for teacher_fewshot mode.")
-    parser.add_argument("--retry_on_protocol_fail", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--max_attempts", type=int, default=1, help="Maximum generation attempts when retry is enabled.")
-    parser.add_argument("--use_chat_template", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--enable_thinking", action="store_true")
-    parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--strip_role_markers", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--record_token_usage", action=argparse.BooleanOptionalAction, default=PROJECT_SETTINGS.token_budget.record_token_usage)
-    parser.add_argument("--eval_track", type=str, default="", help="Optional evaluation track label saved into generated rows.")
-    parser.add_argument("--eval_variant", type=str, default="", help="Optional evaluation variant label saved into generated rows.")
+    parser.add_argument("--repetition_penalty", type=float, default=None)
+    parser.add_argument("--prompt_mode", type=str, default=None, choices=["infer", "teacher", "teacher_fewshot"])
+    parser.add_argument("--fewshot_k", type=int, default=None, help="Number of few-shot examples for teacher_fewshot mode.")
+    parser.add_argument("--retry_on_protocol_fail", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--max_attempts", type=int, default=None, help="Maximum generation attempts when retry is enabled.")
+    parser.add_argument("--use_chat_template", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--enable_thinking", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--strip_role_markers", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--record_token_usage", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--eval_track", type=str, default=None, help="Optional evaluation track label saved into generated rows.")
+    parser.add_argument("--eval_variant", type=str, default=None, help="Optional evaluation variant label saved into generated rows.")
     parser.add_argument("--out_jsonl", type=str, required=True, help="Generated outputs JSONL path.")
-    return parser.parse_args()
+    return resolve_generation_args(parser.parse_args(), preset="structured_eval")
 
 
 def _fewshot_examples() -> List[Dict[str, Any]]:

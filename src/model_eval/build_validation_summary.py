@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from dataio import write_json
+from project_config.resolve import resolve_eval_args
 
 from .common import write_csv
 from .summary_builders import build_validation_summary_rows, read_csv_rows, select_best_checkpoint
@@ -14,10 +15,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--loss_curve_path", type=str, required=True, help="Validation SFT loss CSV.")
     parser.add_argument("--out_csv", type=str, required=True, help="Validation summary CSV output path.")
     parser.add_argument("--selection_out", type=str, required=True, help="Selection JSON output path.")
-    parser.add_argument("--parse_ok_threshold", type=float, default=0.95)
-    parser.add_argument("--protocol_ok_threshold", type=float, default=0.98)
-    parser.add_argument("--evidence_ok_threshold", type=float, default=0.95)
-    return parser.parse_args()
+    parser.add_argument("--parse_ok_threshold", type=float, default=None)
+    parser.add_argument("--protocol_ok_threshold", type=float, default=None)
+    parser.add_argument("--evidence_ok_threshold", type=float, default=None)
+    return resolve_eval_args(parser.parse_args(), preset="selection")
 
 
 def run_build_validation_summary(args: argparse.Namespace) -> tuple[list[dict], dict]:

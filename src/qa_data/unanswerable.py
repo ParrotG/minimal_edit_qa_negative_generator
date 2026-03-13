@@ -4,6 +4,8 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
+from project_config import PROJECT_SETTINGS
+
 from .construct import ConstructionConfig, build_answerable_example
 from .records import ContextDocument, QaExample, SupportingSentence
 
@@ -12,13 +14,13 @@ from .records import ContextDocument, QaExample, SupportingSentence
 class UnanswerableBuildConfig:
     """Configuration for unanswerable example construction."""
 
-    replace_supporting_facts_min: int = 1
-    replace_supporting_facts_max: int = 1
-    same_doc_candidate_radius: int = 1
-    allow_same_doc_non_adjacent: bool = True
-    adjacent_doc_sentence_limit: int = 1
-    include_title_prefix: bool = True
-    seed: int = 42
+    replace_supporting_facts_min: int = PROJECT_SETTINGS.source.replace_supporting_facts_min
+    replace_supporting_facts_max: int = PROJECT_SETTINGS.source.replace_supporting_facts_max
+    same_doc_candidate_radius: int = PROJECT_SETTINGS.source.same_doc_candidate_radius
+    allow_same_doc_non_adjacent: bool = PROJECT_SETTINGS.source.allow_same_doc_non_adjacent
+    adjacent_doc_sentence_limit: int = PROJECT_SETTINGS.source.adjacent_doc_sentence_limit
+    include_title_prefix: bool = PROJECT_SETTINGS.source.include_title_prefix
+    seed: int = PROJECT_SETTINGS.source.seed
 
 
 def _format_sentence_block(title: str, sentence: str, include_title_prefix: bool) -> str:

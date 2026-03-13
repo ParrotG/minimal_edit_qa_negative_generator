@@ -14,6 +14,14 @@ The project is designed for research on grounded factuality under explicit evide
 - `src/llm_textgen`: local and API-based text generation
 - `src/project_config`: centralized default settings for models, tokenizers, APIs, and calibration
 
+## Configuration
+
+Project defaults are centralized in `src/project_config/settings.py`.
+
+- Change `PROJECT_SETTINGS` when you want to update repository-wide default behavior.
+- Pass CLI arguments only when you want to override those defaults for one run.
+- Entry-point scripts resolve missing CLI values from `PROJECT_SETTINGS`, so one-command workflows and step-by-step workflows use the same default configuration source.
+
 ## Requirements
 
 - Python 3.11+
@@ -90,6 +98,13 @@ python -m grounded_qa.cli teacher generate \
   --metrics-out outputs/grounded_qa/teacher_generate_metrics.json
 ```
 
+```bash
+python -m grounded_qa.cli teacher generate \
+  --in-path data/grounded_qa/partitioned/validation.jsonl \
+  --out data/grounded_qa/teacher_candidates_validation_sft.jsonl \
+  --metrics-out outputs/grounded_qa/teacher_generate_metrics_validation.json
+```
+
 ### 6. Teacher Validation
 
 ```bash
@@ -100,6 +115,15 @@ python -m grounded_qa.cli teacher validate \
   --metrics-out outputs/grounded_qa/teacher_validate_metrics.json
 ```
 
+```bash
+python -m grounded_qa.cli teacher validate \
+  --in-path data/grounded_qa/teacher_candidates_validation_sft.jsonl \
+  --out data/grounded_qa/validated_validation_sft.jsonl \
+  --selected-out data/grounded_qa/selected_validation_sft.jsonl \
+  --metrics-out outputs/grounded_qa/teacher_validate_metrics_validation.json
+```
+
+
 ### 7. Build SFT Records
 
 ```bash
@@ -109,12 +133,19 @@ python -m grounded_qa.cli build sft-records \
   --metrics-out outputs/grounded_qa/sft_records_metrics.json
 ```
 
+```bash
+python -m grounded_qa.cli build sft-records \
+  --in-path data/grounded_qa/validated_validation_sft.jsonl \
+  --out data/grounded_qa/sft_records_validation_sft.jsonl \
+  --metrics-out outputs/grounded_qa/sft_records_metrics_validation.json
+```
+
 ### 8. Prepare the SFT Dataset
 
 ```bash
 python -m sft_trainer.prepare_sft_dataset \
   --train-paths data/grounded_qa/sft_records_train_sft.jsonl \
-  --validation-paths data/grounded_qa/sft_records_validation.jsonl \
+  --validation-paths data/grounded_qa/sft_records_validation_sft.jsonl \
   --test-paths data/grounded_qa/partitioned/test.jsonl \
   --output-dir data/sft_dataset \
   --overwrite-output \

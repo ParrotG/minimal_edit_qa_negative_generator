@@ -5,6 +5,7 @@ import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
+from project_config import PROJECT_SETTINGS
 from qa_protocol import parse_structured_output
 
 from dataio import optional_str, pick_first_non_empty_str, read_json, read_jsonl
@@ -443,11 +444,12 @@ def normalize_generated_row(
     row: Dict[str, Any],
     idx: int,
     *,
-    answer_source: str = "answer",
+    answer_source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Normalize one generated-answer row for downstream evaluators."""
 
-    answer = _extract_generated_answer(row, answer_source=answer_source)
+    resolved_answer_source = answer_source or PROJECT_SETTINGS.eval.deepeval.answer_source
+    answer = _extract_generated_answer(row, answer_source=resolved_answer_source)
     if not answer:
         return None
 
@@ -494,7 +496,7 @@ def load_generated_rows(
     split: str,
     max_samples: int,
     seed: int,
-    answer_source: str = "answer",
+    answer_source: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Load normalized generated-answer rows for evaluation."""
 
