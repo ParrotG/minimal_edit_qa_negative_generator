@@ -8,8 +8,8 @@ from typing import Optional, Tuple
 class ModelSettings:
     """Project-wide default model identifiers."""
 
-    target_training_llm: str = "Qwen/Qwen3-0.6B"
-    default_tokenizer_name: str = "Qwen/Qwen3-0.6B"
+    target_training_llm: str = "Qwen/Qwen3-4B"
+    default_tokenizer_name: str = "Qwen/Qwen3-4B"
 
 
 @dataclass(frozen=True)
