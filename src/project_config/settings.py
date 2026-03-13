@@ -8,8 +8,8 @@ from typing import Optional, Tuple
 class ModelSettings:
     """Project-wide default model identifiers."""
 
-    target_training_llm: str = "Qwen/Qwen3-4B"
-    default_tokenizer_name: str = "Qwen/Qwen3-4B"
+    target_training_llm: str = "Qwen/Qwen3-0.6B"
+    default_tokenizer_name: str = "Qwen/Qwen3-0.6B"
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ class NliSettings:
 
     model_name: str = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
     device: str = "cuda"
-    batch_size: int = 16
+    batch_size: int = 64
     max_length: int = 512
     fp16: bool = True
 
@@ -98,7 +98,7 @@ class TokenBudgetSettings:
 
     prompt_limit: int = 512
     completion_limit: int = 512
-    count_batch_size: int = 128
+    count_batch_size: int = 512
     record_token_usage: bool = False
 
 
@@ -107,13 +107,13 @@ class GenerationSettings:
     """Local generation runtime defaults."""
 
     device: str = "cuda"
-    device_map: Optional[str] = "auto"
+    device_map: Optional[str] = None
     dtype: str = "bf16"
     trust_remote_code: bool = True
     padding_side: str = "left"
     use_fast_tokenizer: bool = True
     seed: int = 42
-    batch_size: int = 16
+    batch_size: int = 32
     max_new_tokens: int = 512
     temperature: float = 0.0
     top_p: float = 1.0
@@ -185,9 +185,9 @@ class TrainingSettings:
     max_completion_tokens: int = 512
     train_epochs: float = 2.0
     learning_rate: float = 2e-4
-    train_batch_size: int = 1
-    eval_batch_size: int = 1
-    gradient_accumulation_steps: int = 32
+    train_batch_size: int = 8
+    eval_batch_size: int = 16
+    gradient_accumulation_steps: int = 4
     max_length: int = 1024
     save_steps: int = 50
     save_total_limit: int = 20
@@ -213,7 +213,7 @@ class EvalStructuredGenerationSettings:
     split: str = "validation"
     max_samples: int = -1
     include_base: bool = False
-    batch_size: int = 16
+    batch_size: int = 32
     max_new_tokens: int = 512
     temperature: float = 0.0
     top_p: float = 1.0
@@ -233,7 +233,7 @@ class EvalBaseProtocolSettings:
     split: str = "test"
     max_samples: int = -1
     include_base: bool = True
-    batch_size: int = 16
+    batch_size: int = 32
     max_new_tokens: int = 512
     temperature: float = 0.2
     top_p: float = 1.0
@@ -253,7 +253,7 @@ class EvalFlatGenerationSettings:
     split: str = "test"
     max_samples: int = -1
     include_base: bool = True
-    batch_size: int = 16
+    batch_size: int = 32
     max_new_tokens: int = 512
     think_max_new_tokens: int = 1024
     temperature: float = 0.0
@@ -283,7 +283,7 @@ class EvalLossCurveSettings:
     split: str = "validation"
     max_samples: int = -1
     include_base: bool = True
-    batch_size: int = 4
+    batch_size: int = 16
     eval_track: str = "sft_structured"
     eval_variant: str = "checkpoint"
 
