@@ -38,8 +38,8 @@ class AnswerExtractionApiSettings:
     base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     api_key_env: str = "DASHSCOPE_API_KEY"
     timeout_seconds: float = 90.0
-    max_concurrency: int = 64
-    max_retries: int = 3
+    max_concurrency: int = 8
+    max_retries: int = 4
     backoff_base_seconds: float = 0.5
     backoff_max_seconds: float = 8.0
     max_tokens: int = 128
