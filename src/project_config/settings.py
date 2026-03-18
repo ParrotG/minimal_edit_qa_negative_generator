@@ -175,7 +175,7 @@ class TrainingSettings:
     max_train_samples: int = 10000
     max_validation_samples: int = 500
     max_test_samples: int = 500
-    max_train_answerable_samples: int = 9000
+    max_train_answerable_samples: int = 8000
     max_train_unanswerable_samples: int = 2000
     max_validation_answerable_samples: int = 400
     max_validation_unanswerable_samples: int = 100
@@ -235,15 +235,15 @@ class EvalBaseProtocolSettings:
     include_base: bool = True
     batch_size: int = 32
     max_new_tokens: int = 512
-    temperature: float = 0.2
+    temperature: float = 0.0
     top_p: float = 1.0
     repetition_penalty: float = 1.0
     prompt_mode: str = "teacher_fewshot"
     fewshot_k: int = 2
-    retry_on_protocol_fail: bool = True
-    max_attempts: int = 3
+    retry_on_protocol_fail: bool = False
+    max_attempts: int = 1
     eval_track: str = "base_protocol"
-    eval_variant: str = "fewshot_retry"
+    eval_variant: str = "fewshot"
 
 
 @dataclass(frozen=True)

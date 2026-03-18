@@ -128,6 +128,45 @@ def resolve_generation_args(args: Namespace, *, preset: str) -> Namespace:
     raise ValueError(f"Unsupported generation resolver preset: {preset}")
 
 
+def resolve_structured_eval_args_by_mode(args: Namespace) -> Namespace:
+    """Resolve structured-generation defaults according to the selected prompt mode."""
+
+    generation = PROJECT_SETTINGS.generation
+    structured = PROJECT_SETTINGS.eval.structured_generation
+    base_protocol = PROJECT_SETTINGS.eval.base_protocol
+    model = PROJECT_SETTINGS.model
+
+    prompt_mode = coalesce(getattr(args, "prompt_mode", None), structured.prompt_mode)
+    is_base_protocol_mode = str(prompt_mode).strip() == "teacher_fewshot"
+    active = base_protocol if is_base_protocol_mode else structured
+
+    resolved = resolve_namespace(
+        args,
+        split=active.split,
+        max_samples=active.max_samples,
+        seed=generation.seed,
+        base_model=model.target_training_llm,
+        include_base=active.include_base,
+        batch_size=active.batch_size,
+        max_new_tokens=active.max_new_tokens,
+        temperature=active.temperature,
+        top_p=active.top_p,
+        repetition_penalty=active.repetition_penalty,
+        prompt_mode=prompt_mode,
+        fewshot_k=active.fewshot_k,
+        retry_on_protocol_fail=active.retry_on_protocol_fail,
+        max_attempts=active.max_attempts,
+        use_chat_template=generation.use_chat_template,
+        enable_thinking=generation.enable_thinking,
+        strip_think_tags=generation.strip_think_tags,
+        strip_role_markers=generation.strip_role_markers,
+        record_token_usage=PROJECT_SETTINGS.token_budget.record_token_usage,
+        eval_track=active.eval_track,
+        eval_variant=active.eval_variant,
+    )
+    return resolved
+
+
 def resolve_nli_args(args: Namespace) -> Namespace:
     """Resolve NLI and judge arguments from central settings."""
 

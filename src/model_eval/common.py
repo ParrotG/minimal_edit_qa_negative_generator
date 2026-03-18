@@ -151,7 +151,7 @@ def infer_eval_variant(row: Dict[str, Any]) -> str:
 
     prompt_mode = optional_stripped(row.get("prompt_mode"))
     if prompt_mode in {"teacher", "teacher_fewshot"}:
-        return "fewshot_retry"
+        return "fewshot"
     if prompt_mode == "infer" or "parsed_output" in row:
         return "checkpoint"
     if row.get("enable_thinking") is True:

@@ -175,6 +175,8 @@ This workflow writes two final summary CSV files:
 - `outputs/model_eval/final_report/report/validation_summary.csv` for checkpoint selection on the validation split
 - `outputs/model_eval/final_report/report/test_summary.csv` for final test-time comparison across the best checkpoint and the three baselines
 
+For formal model comparison, all evaluated paths in this workflow use single-pass deterministic decoding (`temperature=0`, `top_p=1`, no protocol-fail retry). Teacher supervision generation is the only generation stage that keeps sampling enabled.
+
 ### 10.1 Step-by-Step Model Evaluation
 
 The one-command report workflow is convenient for final runs. For iterative development, the same evaluation pipeline can be executed step by step.
@@ -194,9 +196,6 @@ python -m model_eval.generate_structured_answers \
   --data_path data/sft_dataset \
   --split validation \
   --lora_ckpt_list_path ckpt/sft_lora_groundedqa \
-  --retry_on_protocol_fail \
-  --max_attempts 2 \
-  --temperature 0.2 \
   --out_jsonl outputs/model_eval/validation/sft_val_structured_generations.jsonl
 ```
 
@@ -223,9 +222,6 @@ python -m model_eval.generate_structured_answers \
   --data_path data/sft_dataset \
   --split test \
   --lora_ckpt_path ckpt/sft_lora_groundedqa/checkpoint-XXX \
-  --retry_on_protocol_fail \
-  --max_attempts 2 \
-  --temperature 0.2 \
   --out_jsonl outputs/model_eval/test/best_ckpt_structured_generations.jsonl
 ```
 
@@ -247,15 +243,14 @@ python -m model_eval.eval_deepeval_hallucination \
 
 Test split, base protocol baseline:
 
+The `teacher_fewshot` mode automatically resolves to the official protocol-baseline defaults, including `fewshot_k=2`.
+
 ```bash
 python -m model_eval.generate_structured_answers \
   --data_path data/sft_dataset \
   --split test \
   --include_base \
   --prompt_mode teacher_fewshot \
-  --retry_on_protocol_fail \
-  --max_attempts 3 \
-  --temperature 0.2 \
   --out_jsonl outputs/model_eval/test/base_protocol_generations.jsonl
 ```
 
