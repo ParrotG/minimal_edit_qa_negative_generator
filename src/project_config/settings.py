@@ -113,7 +113,7 @@ class GenerationSettings:
     padding_side: str = "left"
     use_fast_tokenizer: bool = True
     seed: int = 42
-    batch_size: int = 32
+    batch_size: int = 64
     max_new_tokens: int = 512
     temperature: float = 0.0
     top_p: float = 1.0
