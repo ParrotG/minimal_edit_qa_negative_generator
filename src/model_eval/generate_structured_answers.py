@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - compatibility fallback for editable in
     from llm_textgen import GeneratorModelSpec, build_generator_model_specs, load_generator_from_spec
 
 from dataio import write_jsonl
-from project_config.resolve import resolve_generation_args
+from project_config.resolve import resolve_structured_eval_args_by_mode
 from qa_checks import check_protocol_constraints
 from qa_protocol import build_infer_prompt, build_teacher_prompt, parse_structured_output
 
@@ -43,8 +43,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repetition_penalty", type=float, default=None)
     parser.add_argument("--prompt_mode", type=str, default=None, choices=["infer", "teacher", "teacher_fewshot"])
     parser.add_argument("--fewshot_k", type=int, default=None, help="Number of few-shot examples for teacher_fewshot mode.")
-    parser.add_argument("--retry_on_protocol_fail", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--max_attempts", type=int, default=None, help="Maximum generation attempts when retry is enabled.")
+    parser.add_argument(
+        "--retry_on_protocol_fail",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Compatibility flag kept for older scripts. Structured evaluation now always uses a single pass.",
+    )
+    parser.add_argument(
+        "--max_attempts",
+        type=int,
+        default=None,
+        help="Compatibility flag kept for older scripts. Structured evaluation now always uses a single pass.",
+    )
     parser.add_argument("--use_chat_template", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--enable_thinking", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--strip_think_tags", action=argparse.BooleanOptionalAction, default=None)
@@ -53,7 +63,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_track", type=str, default=None, help="Optional evaluation track label saved into generated rows.")
     parser.add_argument("--eval_variant", type=str, default=None, help="Optional evaluation variant label saved into generated rows.")
     parser.add_argument("--out_jsonl", type=str, required=True, help="Generated outputs JSONL path.")
-    return resolve_generation_args(parser.parse_args(), preset="structured_eval")
+    args = resolve_structured_eval_args_by_mode(parser.parse_args())
+    args.retry_on_protocol_fail = False
+    args.max_attempts = 1
+    return args
 
 
 def _fewshot_examples() -> List[Dict[str, Any]]:
@@ -139,7 +152,7 @@ def _parse_protocol(raw_output: str) -> tuple[bool, bool, Any]:
     return parse_ok, protocol_ok, parse_result
 
 
-def _generate_batch_with_retry(
+def _generate_batch_single_pass(
     *,
     generator: Any,
     batch: List[Dict[str, Any]],
@@ -166,46 +179,36 @@ def _generate_batch_with_retry(
             }
         )
 
-    active_indices = list(range(len(rows_state)))
-    effective_attempts = max(1, int(args.max_attempts)) if bool(args.retry_on_protocol_fail) else 1
-    for attempt in range(1, effective_attempts + 1):
-        if not active_indices:
-            break
-        prompts = [rows_state[idx]["prompt"] for idx in active_indices]
-        outputs = generator.generate_many_results(
-            prompts,
-            batch_size=args.batch_size,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            min_p=args.min_p,
-            repetition_penalty=args.repetition_penalty,
-            use_chat_template=args.use_chat_template,
-            enable_thinking=args.enable_thinking,
-            strip_think_tags=args.strip_think_tags,
-            strip_role_markers=args.strip_role_markers,
-        )
+    prompts = [state["prompt"] for state in rows_state]
+    outputs = generator.generate_many_results(
+        prompts,
+        batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        min_p=args.min_p,
+        repetition_penalty=args.repetition_penalty,
+        use_chat_template=args.use_chat_template,
+        enable_thinking=args.enable_thinking,
+        strip_think_tags=args.strip_think_tags,
+        strip_role_markers=args.strip_role_markers,
+    )
 
-        next_active: List[int] = []
-        for item_idx, output in zip(active_indices, outputs):
-            raw_output = str(output.text)
-            parse_ok, protocol_ok, parse_result = _parse_protocol(raw_output)
-            state = rows_state[item_idx]
-            state["raw_output"] = raw_output
-            state["parse_ok"] = bool(parse_ok)
-            state["protocol_passed"] = bool(protocol_ok)
-            state["parse_result"] = parse_result
-            state["attempt_count"] = attempt
-            if output.token_usage is not None:
-                token_usage_totals = state["token_usage_totals"]
-                token_usage_totals["prompt_tokens"] += int(output.token_usage.prompt_tokens)
-                token_usage_totals["completion_tokens"] += int(output.token_usage.completion_tokens)
-                token_usage_totals["total_tokens"] += int(output.token_usage.total_tokens)
-                token_usage_totals["source"] = str(output.token_usage.source)
-            if bool(args.retry_on_protocol_fail) and not protocol_ok and attempt < effective_attempts:
-                next_active.append(item_idx)
-        active_indices = next_active
+    for state, output in zip(rows_state, outputs):
+        raw_output = str(output.text)
+        parse_ok, protocol_ok, parse_result = _parse_protocol(raw_output)
+        state["raw_output"] = raw_output
+        state["parse_ok"] = bool(parse_ok)
+        state["protocol_passed"] = bool(protocol_ok)
+        state["parse_result"] = parse_result
+        state["attempt_count"] = 1
+        if output.token_usage is not None:
+            token_usage_totals = state["token_usage_totals"]
+            token_usage_totals["prompt_tokens"] += int(output.token_usage.prompt_tokens)
+            token_usage_totals["completion_tokens"] += int(output.token_usage.completion_tokens)
+            token_usage_totals["total_tokens"] += int(output.token_usage.total_tokens)
+            token_usage_totals["source"] = str(output.token_usage.source)
 
     out_rows: List[Dict[str, Any]] = []
     for state in rows_state:
@@ -281,7 +284,7 @@ def _resolve_eval_variant(args: argparse.Namespace) -> str:
         return str(args.eval_variant).strip()
     if args.prompt_mode == "infer":
         return "checkpoint"
-    return "fewshot_retry"
+    return "fewshot"
 
 
 def run_structured_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
@@ -327,7 +330,7 @@ def run_structured_generation(args: argparse.Namespace) -> List[Dict[str, Any]]:
 
         for start in range(0, len(items), args.batch_size):
             batch = items[start : start + args.batch_size]
-            batch_rows = _generate_batch_with_retry(
+            batch_rows = _generate_batch_single_pass(
                 generator=generator,
                 batch=batch,
                 args=args,
